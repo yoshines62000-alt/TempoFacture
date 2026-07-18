@@ -255,6 +255,86 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertEqual(stored[0]["project_name"], "Forfait mensuel")
         self.assertEqual(stored[0]["hours"], 10.0)
 
+    def test_create_invoice_freezes_the_current_currency_setting(self):
+        self.db.set_setting("currency", "USD")
+        client_id = self.db.add_client("Client")
+        line_items = [LineItem(project_name="Forfait", hours=1.0, rate=100.0)]
+        invoice_id = self.db.create_invoice(client_id, [], line_items=line_items)
+        self.assertEqual(self.db.get_invoice(invoice_id)["currency"], "USD")
+
+    def test_changing_the_currency_setting_does_not_retroactively_relabel_old_invoices(self):
+        # Trouve a l'audit : sans devise figee par facture, changer le
+        # parametre global apres coup relabellisait silencieusement toutes
+        # les factures deja emises, sans aucune conversion reelle du montant.
+        self.db.set_setting("currency", "EUR")
+        client_id = self.db.add_client("Client")
+        line_items = [LineItem(project_name="Forfait", hours=1.0, rate=100.0)]
+        invoice_id = self.db.create_invoice(client_id, [], line_items=line_items)
+        self.db.set_setting("currency", "USD")
+        self.assertEqual(self.db.get_invoice(invoice_id)["currency"], "EUR")
+
+    def test_create_invoice_defaults_to_eur_when_no_currency_setting_exists(self):
+        client_id = self.db.add_client("Client")
+        line_items = [LineItem(project_name="Forfait", hours=1.0, rate=100.0)]
+        invoice_id = self.db.create_invoice(client_id, [], line_items=line_items)
+        self.assertEqual(self.db.get_invoice(invoice_id)["currency"], "EUR")
+
+    def test_create_invoice_accepts_an_explicit_currency_override(self):
+        client_id = self.db.add_client("Client")
+        line_items = [LineItem(project_name="Forfait", hours=1.0, rate=100.0)]
+        invoice_id = self.db.create_invoice(client_id, [], line_items=line_items, currency="GBP")
+        self.assertEqual(self.db.get_invoice(invoice_id)["currency"], "GBP")
+
+    def test_reopening_a_pre_currency_database_file_adds_the_missing_column(self):
+        # Simule une base creee avant l'ajout de currency : la migration
+        # additive ne doit ni planter, ni casser les factures existantes.
+        self.db.close()
+        import sqlite3
+
+        old_style_path = self.tmp / "old.sqlite"
+        conn = sqlite3.connect(str(old_style_path))
+        conn.executescript("""
+            CREATE TABLE clients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
+                address TEXT NOT NULL DEFAULT '', hourly_rate REAL NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            );
+            CREATE TABLE projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, name TEXT NOT NULL,
+                hourly_rate REAL, archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            );
+            CREATE TABLE time_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, start_time TEXT NOT NULL,
+                end_time TEXT, description TEXT NOT NULL DEFAULT '', invoice_id INTEGER
+            );
+            CREATE TABLE invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, invoice_number TEXT NOT NULL UNIQUE,
+                issue_date TEXT NOT NULL, due_date TEXT, tax_rate REAL NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'unpaid', created_at TEXT NOT NULL
+            );
+            CREATE TABLE invoice_line_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL, project_name TEXT NOT NULL,
+                hours REAL NOT NULL, rate REAL NOT NULL
+            );
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        conn.execute(
+            "INSERT INTO clients (name, created_at) VALUES ('Ancien client', '2026-01-01')"
+        )
+        conn.execute(
+            "INSERT INTO invoices (client_id, invoice_number, issue_date, created_at) "
+            "VALUES (1, '2025-0001', '2025-01-01', '2025-01-01')"
+        )
+        conn.commit()
+        conn.close()
+
+        reopened = Database(old_style_path)
+        self.addCleanup(reopened.close)
+        old_invoice = reopened.list_invoices()[0]
+        self.assertEqual(old_invoice["currency"], "EUR")
+        new_id = reopened.create_invoice(1, [], line_items=[LineItem("Forfait", 1.0, 50.0)])
+        self.assertEqual(reopened.get_invoice(new_id)["currency"], "EUR")
+
     def test_settings_roundtrip(self):
         self.db.set_setting("company_name", "Ma Societe")
         self.assertEqual(self.db.get_setting("company_name"), "Ma Societe")

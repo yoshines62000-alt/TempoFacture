@@ -89,6 +89,20 @@ class Database:
         );
         """)
         self.conn.commit()
+        # currency a ete ajoutee apres la sortie initiale : les bases SQLite
+        # existantes ne sont pas recreees par CREATE TABLE IF NOT EXISTS,
+        # d'ou cette migration additive explicite (idempotente). Sans elle,
+        # changer la devise dans les Parametres relabelliserait
+        # retroactivement toutes les factures deja emises (meme montant,
+        # mauvaise devise affichee) - chaque facture doit au contraire
+        # figer la devise en vigueur au moment de sa creation.
+        self._add_column_if_missing("invoices", "currency", "TEXT NOT NULL DEFAULT 'EUR'")
+
+    def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self.conn.commit()
 
     # -- clients ------------------------------------------------------------
 
@@ -303,16 +317,21 @@ class Database:
         due_date: Optional[str] = None,
         notes: str = "",
         line_items: Optional[list] = None,
+        currency: Optional[str] = None,
     ) -> int:
         issue_date = _now_iso()
         # Use the same (UTC) year as issue_date, so the invoice number never
         # disagrees with the date printed on the invoice itself.
         invoice_number = self.next_invoice_number(year=datetime.fromisoformat(issue_date).year)
+        # Fige la devise en vigueur au moment de la creation : elle ne doit
+        # plus jamais changer ensuite, meme si le parametre global de devise
+        # est modifie par la suite (voir _add_column_if_missing ci-dessus).
+        currency = currency or self.get_setting("currency", "EUR")
         try:
             cur = self.conn.execute(
-                """INSERT INTO invoices (client_id, invoice_number, issue_date, due_date, tax_rate, notes, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (client_id, invoice_number, issue_date, due_date, tax_rate, notes.strip(), _now_iso()),
+                """INSERT INTO invoices (client_id, invoice_number, issue_date, due_date, tax_rate, notes, currency, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (client_id, invoice_number, issue_date, due_date, tax_rate, notes.strip(), currency, _now_iso()),
             )
             invoice_id = cur.lastrowid
             if time_entry_ids:

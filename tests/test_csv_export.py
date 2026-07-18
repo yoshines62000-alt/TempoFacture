@@ -66,10 +66,11 @@ class CsvExportTestCase(unittest.TestCase):
         csv_export.export_invoices_csv(invoices, self.db, output)
 
         rows = self._read_csv(output)
-        self.assertEqual(rows[0], ["Numero", "Client", "Date d'emission", "Echeance", "TVA (%)", "Total", "Statut"])
+        self.assertEqual(rows[0], ["Numero", "Client", "Date d'emission", "Echeance", "TVA (%)", "Total", "Devise", "Statut"])
         self.assertEqual(rows[1][1], "Client Test")
         self.assertEqual(rows[1][5], "120.00")  # 2h * 50 = 100, + 20% TVA = 120
-        self.assertEqual(rows[1][6], "unpaid")
+        self.assertEqual(rows[1][6], "EUR")
+        self.assertEqual(rows[1][7], "unpaid")
 
     def test_export_invoices_csv_with_no_invoices_writes_header_only(self):
         output = self.tmp / "invoices.csv"

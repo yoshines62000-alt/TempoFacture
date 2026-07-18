@@ -40,7 +40,7 @@ def export_invoices_csv(invoices: list, db, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["Numero", "Client", "Date d'emission", "Echeance", "TVA (%)", "Total", "Statut"])
+        writer.writerow(["Numero", "Client", "Date d'emission", "Echeance", "TVA (%)", "Total", "Devise", "Statut"])
         for invoice in invoices:
             stored_items = db.get_invoice_line_items(invoice["id"])
             line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
@@ -49,5 +49,5 @@ def export_invoices_csv(invoices: list, db, output_path: Path) -> None:
             writer.writerow([
                 invoice["invoice_number"], client["name"] if client else "",
                 invoice["issue_date"][:10], (invoice["due_date"] or "")[:10],
-                invoice["tax_rate"], f"{total:.2f}", invoice["status"],
+                invoice["tax_rate"], f"{total:.2f}", invoice["currency"], invoice["status"],
             ])

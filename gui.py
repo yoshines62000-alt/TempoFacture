@@ -636,7 +636,7 @@ class TempoFactureApp:
             _, _, total = compute_totals(line_items, invoice["tax_rate"])
             self.invoices_tree.insert("", END, iid=str(invoice["id"]), values=(
                 invoice["id"], invoice["invoice_number"], clients_by_id.get(invoice["client_id"], "?"),
-                invoice["issue_date"][:10], format_amount(total, self._currency()), invoice["status"],
+                invoice["issue_date"][:10], format_amount(total, invoice["currency"]), invoice["status"],
             ))
         self._refresh_uninvoiced_preview()
 
@@ -696,6 +696,7 @@ class TempoFactureApp:
         try:
             invoice_id = self.db.create_invoice(
                 client_id, [e["id"] for e in entries], tax_rate=tax_rate, line_items=line_items, due_date=due_date,
+                currency=self._currency(),
             )
         except ValueError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
@@ -714,7 +715,7 @@ class TempoFactureApp:
                 client_address=client["address"],
                 line_items=line_items,
                 tax_rate=tax_rate,
-                currency=self._currency(),
+                currency=invoice["currency"],
             )
         except OSError as exc:
             # Le PDF n'a pas pu etre ecrit (permission refusee, fichier
@@ -800,7 +801,7 @@ class TempoFactureApp:
         try:
             new_invoice_id = self.db.create_invoice(
                 source_invoice["client_id"], [], tax_rate=source_invoice["tax_rate"],
-                due_date=due_date, line_items=line_items,
+                due_date=due_date, line_items=line_items, currency=self._currency(),
             )
         except ValueError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
@@ -819,7 +820,7 @@ class TempoFactureApp:
                 client_address=client["address"],
                 line_items=line_items,
                 tax_rate=source_invoice["tax_rate"],
-                currency=self._currency(),
+                currency=new_invoice["currency"],
             )
         except OSError as exc:
             self.db.delete_invoice(new_invoice_id)
