@@ -7,6 +7,7 @@ La conversion vers l'heure locale ne se fait qu'a l'affichage (gui.py).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -437,3 +438,30 @@ class Database:
             (key, value),
         )
         self.conn.commit()
+
+    # -- modeles de notes de facture reutilisables -------------------------
+    # Stockes sous forme de JSON dans la table settings (une seule cle),
+    # plutot qu'une nouvelle table : une poignee de modeles nommes ne
+    # justifie pas un schema dedie.
+
+    def list_note_templates(self) -> list:
+        raw = self.get_setting("note_templates", "[]")
+        try:
+            templates = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(templates, list):
+            return []
+        return [t for t in templates if isinstance(t, dict) and "name" in t and "text" in t]
+
+    def save_note_template(self, name: str, text: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("le nom du modele ne peut pas etre vide")
+        templates = [t for t in self.list_note_templates() if t["name"] != name]
+        templates.append({"name": name, "text": text})
+        self.set_setting("note_templates", json.dumps(templates))
+
+    def delete_note_template(self, name: str) -> None:
+        templates = [t for t in self.list_note_templates() if t["name"] != name]
+        self.set_setting("note_templates", json.dumps(templates))

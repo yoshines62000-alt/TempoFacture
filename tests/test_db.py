@@ -376,6 +376,37 @@ class DatabaseTestCase(unittest.TestCase):
         overdue = self.db.list_overdue_invoices()
         self.assertEqual(len(overdue), 1)
 
+    def test_save_and_list_note_templates(self):
+        self.db.save_note_template("Merci", "Merci pour votre confiance.")
+        templates = self.db.list_note_templates()
+        self.assertEqual(templates, [{"name": "Merci", "text": "Merci pour votre confiance."}])
+
+    def test_save_note_template_with_existing_name_overwrites_it(self):
+        self.db.save_note_template("Merci", "Ancien texte")
+        self.db.save_note_template("Merci", "Nouveau texte")
+        templates = self.db.list_note_templates()
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0]["text"], "Nouveau texte")
+
+    def test_save_note_template_rejects_empty_name(self):
+        with self.assertRaises(ValueError):
+            self.db.save_note_template("   ", "Un texte")
+
+    def test_delete_note_template_removes_only_the_named_one(self):
+        self.db.save_note_template("A", "texte A")
+        self.db.save_note_template("B", "texte B")
+        self.db.delete_note_template("A")
+        names = [t["name"] for t in self.db.list_note_templates()]
+        self.assertEqual(names, ["B"])
+
+    def test_delete_unknown_note_template_is_a_no_op(self):
+        self.db.save_note_template("A", "texte A")
+        self.db.delete_note_template("Inconnu")
+        self.assertEqual(len(self.db.list_note_templates()), 1)
+
+    def test_list_note_templates_returns_empty_list_when_never_set(self):
+        self.assertEqual(self.db.list_note_templates(), [])
+
     def test_settings_roundtrip(self):
         self.db.set_setting("company_name", "Ma Societe")
         self.assertEqual(self.db.get_setting("company_name"), "Ma Societe")

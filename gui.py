@@ -580,6 +580,19 @@ class TempoFactureApp:
         ttk.Entry(top, textvariable=self.invoice_tax_var, width=6).pack(side=LEFT, padx=5)
         ttk.Button(top, text="Generer la facture (PDF)", command=self._generate_invoice).pack(side=LEFT, padx=10)
 
+        notes_row = ttk.Frame(frame)
+        notes_row.pack(fill=X, padx=10, pady=(0, 10))
+        ttk.Label(notes_row, text="Notes (imprimees sur la facture)").pack(side=LEFT)
+        self.invoice_notes_var = StringVar()
+        ttk.Entry(notes_row, textvariable=self.invoice_notes_var, width=45).pack(side=LEFT, padx=5)
+        self.note_template_var = StringVar()
+        self.note_template_combo = ttk.Combobox(notes_row, textvariable=self.note_template_var, width=20, state="readonly")
+        self.note_template_combo.pack(side=LEFT, padx=(10, 5))
+        self.note_template_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_note_template())
+        ttk.Button(notes_row, text="Enregistrer comme modele...", command=self._save_note_template).pack(side=LEFT, padx=5)
+        ttk.Button(notes_row, text="Supprimer le modele", command=self._delete_note_template).pack(side=LEFT)
+        self._refresh_note_templates()
+
         preview_columns = ("project", "hours", "rate", "amount")
         self.preview_tree = ttk.Treeview(frame, columns=preview_columns, show="headings", height=6)
         for col, label, width in [
@@ -616,6 +629,40 @@ class TempoFactureApp:
         ttk.Button(actions, text="Dupliquer (facture recurrente)...", command=self._duplicate_invoice).pack(side=LEFT, padx=5)
         ttk.Button(actions, text="Supprimer (libere les heures)", command=self._delete_invoice).pack(side=RIGHT)
         ttk.Button(actions, text="Exporter en CSV...", command=self._export_invoices_csv).pack(side=RIGHT, padx=(0, 6))
+
+    def _refresh_note_templates(self):
+        templates = self.db.list_note_templates()
+        self.note_template_combo["values"] = [t["name"] for t in templates]
+
+    def _apply_note_template(self):
+        name = self.note_template_var.get()
+        for template in self.db.list_note_templates():
+            if template["name"] == name:
+                self.invoice_notes_var.set(template["text"])
+                return
+
+    def _save_note_template(self):
+        text = self.invoice_notes_var.get().strip()
+        if not text:
+            messagebox.showinfo(APP_TITLE, "Saisissez d'abord un texte de note a enregistrer comme modele.")
+            return
+        name = simpledialog.askstring(APP_TITLE, "Nom du modele :", parent=self.root)
+        if not name or not name.strip():
+            return
+        self.db.save_note_template(name, text)
+        self._refresh_note_templates()
+        self.note_template_var.set(name.strip())
+
+    def _delete_note_template(self):
+        name = self.note_template_var.get()
+        if not name:
+            messagebox.showinfo(APP_TITLE, "Selectionnez d'abord un modele dans la liste.")
+            return
+        if not messagebox.askyesno(APP_TITLE, f"Supprimer le modele de note '{name}' ?"):
+            return
+        self.db.delete_note_template(name)
+        self.note_template_var.set("")
+        self._refresh_note_templates()
 
     def _export_invoices_csv(self):
         invoices = self.db.list_invoices()
@@ -724,7 +771,7 @@ class TempoFactureApp:
         try:
             invoice_id = self.db.create_invoice(
                 client_id, [e["id"] for e in entries], tax_rate=tax_rate, line_items=line_items, due_date=due_date,
-                currency=self._currency(),
+                currency=self._currency(), notes=self.invoice_notes_var.get(),
             )
         except ValueError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
@@ -743,6 +790,7 @@ class TempoFactureApp:
                 client_address=client["address"],
                 line_items=line_items,
                 tax_rate=tax_rate,
+                notes=invoice["notes"],
                 currency=invoice["currency"],
             )
         except OSError as exc:
