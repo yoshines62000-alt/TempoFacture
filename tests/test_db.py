@@ -94,6 +94,25 @@ class DatabaseTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.delete_time_entry(entry_id)
 
+    def test_update_time_entry_rejects_time_change_on_invoiced_entry(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.create_invoice(client_id, [entry_id])
+        with self.assertRaises(ValueError):
+            self.db.update_time_entry(entry_id, end_time="2026-01-01T12:00:00+00:00")
+
+    def test_update_time_entry_allows_description_change_on_invoiced_entry(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.create_invoice(client_id, [entry_id])
+        self.db.update_time_entry(entry_id, description="Note ajoutee apres coup")
+        self.assertEqual(self.db.get_time_entry(entry_id)["description"], "Note ajoutee apres coup")
+
+    def test_get_time_entry_returns_none_for_unknown_id(self):
+        self.assertIsNone(self.db.get_time_entry(999))
+
     def test_list_projects_for_active_clients_excludes_archived_client(self):
         client_id = self.db.add_client("Client")
         project_id = self.db.add_project(client_id, "Projet")

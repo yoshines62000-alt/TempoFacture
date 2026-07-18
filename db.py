@@ -218,10 +218,18 @@ class Database:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
+        current = self.conn.execute(
+            "SELECT start_time, end_time, invoice_id FROM time_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if current and current["invoice_id"] is not None and (
+            "start_time" in updates or "end_time" in updates or "project_id" in updates
+        ):
+            # Les lignes de facture sont figees a la creation (voir
+            # create_invoice), mais changer les horaires ou le projet d'une
+            # entree deja facturee desynchroniserait ce que cette entree
+            # affiche desormais de ce que la facture a reellement enregistre.
+            raise ValueError("Cette entree a deja ete facturee ; annulez d'abord la facture correspondante.")
         if "start_time" in updates or "end_time" in updates:
-            current = self.conn.execute(
-                "SELECT start_time, end_time FROM time_entries WHERE id = ?", (entry_id,)
-            ).fetchone()
             if current:
                 start = updates.get("start_time", current["start_time"])
                 end = updates.get("end_time", current["end_time"])
@@ -237,6 +245,9 @@ class Database:
             raise ValueError("Cette entree a deja ete facturee ; annulez d'abord la facture correspondante.")
         self.conn.execute("DELETE FROM time_entries WHERE id = ?", (entry_id,))
         self.conn.commit()
+
+    def get_time_entry(self, entry_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM time_entries WHERE id = ?", (entry_id,)).fetchone()
 
     def get_running_entry(self) -> Optional[sqlite3.Row]:
         return self.conn.execute(

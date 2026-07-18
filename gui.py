@@ -291,8 +291,12 @@ class TempoFactureApp:
 
         manual = ttk.LabelFrame(frame, text="Ajouter une entree manuelle (heures)")
         manual.pack(fill=X, padx=10, pady=20)
+        from datetime import date as _date
+        self.manual_date_var = StringVar(value=_date.today().isoformat())
         self.manual_hours_var = StringVar()
-        ttk.Label(manual, text="Nombre d'heures").pack(side=LEFT, padx=5, pady=8)
+        ttk.Label(manual, text="Date de fin (AAAA-MM-JJ)").pack(side=LEFT, padx=5, pady=8)
+        ttk.Entry(manual, textvariable=self.manual_date_var, width=12).pack(side=LEFT, padx=5)
+        ttk.Label(manual, text="Nombre d'heures").pack(side=LEFT, padx=(10, 5))
         ttk.Entry(manual, textvariable=self.manual_hours_var, width=8).pack(side=LEFT, padx=5)
         ttk.Button(manual, text="Ajouter au projet selectionne", command=self._add_manual_entry).pack(side=LEFT, padx=10)
 
@@ -304,7 +308,13 @@ class TempoFactureApp:
         ]:
             self.entries_tree.heading(col, text=label)
             self.entries_tree.column(col, width=width, anchor="w")
-        self.entries_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
+        self.entries_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
+        self.entries_tree.bind("<Double-1>", self._edit_time_entry)
+
+        entries_actions = ttk.Frame(frame)
+        entries_actions.pack(fill=X, padx=10, pady=(0, 10))
+        ttk.Label(entries_actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(side=LEFT)
+        ttk.Button(entries_actions, text="Supprimer l'entree selectionnee", command=self._delete_time_entry).pack(side=RIGHT)
 
     def _refresh_timer_project_choices(self):
         # N'affiche que les projets dont le client est actif : un client
@@ -417,11 +427,109 @@ class TempoFactureApp:
                 "Confirmez-vous que ce nombre est correct ?",
             ):
                 return
-        from datetime import datetime, timedelta, timezone
-        end = datetime.now(timezone.utc)
+        from datetime import date as _date, datetime, timedelta, timezone
+        try:
+            target_date = _date.fromisoformat(self.manual_date_var.get().strip())
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "La date de fin doit etre au format AAAA-MM-JJ.")
+            return
+        # Conserve l'heure actuelle mais sur la date choisie : permet de
+        # saisir "3 heures faites hier" sans avoir a viser une heure precise.
+        now = datetime.now(timezone.utc)
+        end = now.replace(year=target_date.year, month=target_date.month, day=target_date.day)
         start = end - timedelta(hours=hours)
         self.db.add_manual_time_entry(project_id, start.isoformat(), end.isoformat(), self.timer_description_var.get().strip())
         self.manual_hours_var.set("")
+        self._refresh_time_entries()
+        self._refresh_invoices()
+
+    def _prompt_time_entry_fields(self, title: str, initial_hours: str, initial_description: str):
+        """Petit dialogue (heures, description) - renvoie (hours_text,
+        description) ou None si annule."""
+        from tkinter import Toplevel
+
+        dialog = Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        hours_var = StringVar(value=initial_hours)
+        desc_var = StringVar(value=initial_description)
+        result = {}
+
+        ttk.Label(dialog, text="Heures").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
+        ttk.Entry(dialog, textvariable=hours_var, width=15).grid(row=0, column=1, padx=10, pady=(10, 5))
+        ttk.Label(dialog, text="Description").grid(row=1, column=0, sticky="w", padx=10)
+        ttk.Entry(dialog, textvariable=desc_var, width=30).grid(row=1, column=1, padx=10, pady=(0, 10))
+
+        def on_ok():
+            result["hours"] = hours_var.get().strip()
+            result["description"] = desc_var.get().strip()
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, columnspan=2, pady=(0, 10))
+        ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
+        ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
+
+        dialog.wait_window()
+        return result or None
+
+    def _edit_time_entry(self, event=None):
+        selection = self.entries_tree.selection()
+        if not selection:
+            return
+        entry_id = int(selection[0])
+        entry = self.db.get_time_entry(entry_id)
+        if entry is None:
+            return
+        if entry["end_time"] is None:
+            messagebox.showinfo(APP_TITLE, "Le chronometre en cours ne peut pas etre modifie ici ; arretez-le d'abord.")
+            return
+
+        from invoice import compute_duration_hours
+        current_hours = compute_duration_hours(entry["start_time"], entry["end_time"])
+        result = self._prompt_time_entry_fields(
+            "Modifier l'entree de temps", f"{current_hours:.2f}", entry["description"]
+        )
+        if result is None:
+            return
+        try:
+            hours = float(result["hours"].replace(",", "."))
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "Entrez un nombre d'heures valide.")
+            return
+        if hours <= 0:
+            messagebox.showwarning(APP_TITLE, "Le nombre d'heures doit etre positif.")
+            return
+
+        from datetime import datetime, timedelta
+        end = datetime.fromisoformat(entry["end_time"])
+        start = end - timedelta(hours=hours)
+        try:
+            self.db.update_time_entry(
+                entry_id, start_time=start.isoformat(), end_time=end.isoformat(), description=result["description"]
+            )
+        except ValueError as exc:
+            messagebox.showwarning(APP_TITLE, str(exc))
+            return
+        self._refresh_time_entries()
+        self._refresh_invoices()
+
+    def _delete_time_entry(self):
+        selection = self.entries_tree.selection()
+        if not selection:
+            messagebox.showinfo(APP_TITLE, "Selectionnez une entree d'abord.")
+            return
+        entry_id = int(selection[0])
+        if not messagebox.askyesno(APP_TITLE, "Supprimer cette entree de temps ?"):
+            return
+        try:
+            self.db.delete_time_entry(entry_id)
+        except ValueError as exc:
+            messagebox.showwarning(APP_TITLE, str(exc))
+            return
         self._refresh_time_entries()
         self._refresh_invoices()
 
@@ -535,9 +643,16 @@ class TempoFactureApp:
         if not output_path:
             return
 
+        from datetime import date as _date, timedelta as _timedelta
+        try:
+            payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
+        except ValueError:
+            payment_terms_days = 30
+        due_date = (_date.today() + _timedelta(days=payment_terms_days)).isoformat()
+
         try:
             invoice_id = self.db.create_invoice(
-                client_id, [e["id"] for e in entries], tax_rate=tax_rate, line_items=line_items,
+                client_id, [e["id"] for e in entries], tax_rate=tax_rate, line_items=line_items, due_date=due_date,
             )
         except ValueError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
@@ -549,7 +664,7 @@ class TempoFactureApp:
                 output_path=Path(output_path),
                 invoice_number=invoice["invoice_number"],
                 issue_date=invoice["issue_date"][:10],
-                due_date=None,
+                due_date=invoice["due_date"],
                 company_name=self.db.get_setting("company_name", "Mon entreprise"),
                 company_info=self.db.get_setting("company_info", ""),
                 client_name=client["name"],
@@ -603,12 +718,15 @@ class TempoFactureApp:
 
         self.setting_company_name_var = StringVar(value=self.db.get_setting("company_name"))
         self.setting_company_info_var = StringVar(value=self.db.get_setting("company_info"))
+        self.setting_payment_terms_var = StringVar(value=self.db.get_setting("payment_terms_days", "30"))
 
         ttk.Label(form, text="Nom de l'entreprise (affiche sur les factures)").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.setting_company_name_var, width=50).grid(row=0, column=1, padx=5)
         ttk.Label(form, text="Informations (SIRET, adresse...)").grid(row=1, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.setting_company_info_var, width=50).grid(row=1, column=1, padx=5)
-        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=2, column=1, sticky="e", pady=10)
+        ttk.Label(form, text="Delai de paiement par defaut (jours)").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(form, textvariable=self.setting_payment_terms_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=3, column=1, sticky="e", pady=10)
 
         ttk.Label(
             frame,
@@ -618,8 +736,17 @@ class TempoFactureApp:
         ).pack(anchor="w", padx=10, pady=20)
 
     def _save_settings(self):
+        try:
+            payment_terms = int(self.setting_payment_terms_var.get().strip() or 0)
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "Le delai de paiement doit etre un nombre entier de jours.")
+            return
+        if payment_terms < 0:
+            messagebox.showwarning(APP_TITLE, "Le delai de paiement ne peut pas etre negatif.")
+            return
         self.db.set_setting("company_name", self.setting_company_name_var.get().strip())
         self.db.set_setting("company_info", self.setting_company_info_var.get().strip())
+        self.db.set_setting("payment_terms_days", str(payment_terms))
         messagebox.showinfo(APP_TITLE, "Parametres enregistres.")
 
     # -- fermeture ------------------------------------------------------------
