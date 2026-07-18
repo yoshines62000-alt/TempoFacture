@@ -761,12 +761,18 @@ class TempoFactureApp:
         if not output_path:
             return
 
-        from datetime import date as _date, timedelta as _timedelta
+        from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
         try:
             payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
         except ValueError:
             payment_terms_days = 30
-        due_date = (_date.today() + _timedelta(days=payment_terms_days)).isoformat()
+        # date.today() (heure locale) melangerait deux fuseaux differents
+        # avec list_overdue_invoices, qui compare toujours a la date UTC du
+        # jour (voir db.py : "Toutes les dates/heures sont stockees en
+        # UTC") - une facture pourrait alors etre jugee en retard un jour
+        # trop tot ou trop tard selon le fuseau de l'utilisateur (bug
+        # trouve a l'audit).
+        due_date = (_datetime.now(_timezone.utc).date() + _timedelta(days=payment_terms_days)).isoformat()
 
         try:
             invoice_id = self.db.create_invoice(
@@ -802,6 +808,13 @@ class TempoFactureApp:
             messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
             return
 
+        # Efface les notes une fois la facture generee : un texte specifique
+        # a CE client (ex: une remise negociee) resterait sinon affiche si
+        # l'utilisateur change de client et genere une nouvelle facture
+        # sans remarquer que le champ contient encore l'ancien texte (bug
+        # trouve a l'audit).
+        self.invoice_notes_var.set("")
+        self.note_template_var.set("")
         self._refresh_invoices()
         self._refresh_time_entries()
         if messagebox.askyesno(APP_TITLE, f"Facture {invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?"):
@@ -867,17 +880,24 @@ class TempoFactureApp:
         if not output_path:
             return
 
-        from datetime import date as _date, timedelta as _timedelta
+        from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
         try:
             payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
         except ValueError:
             payment_terms_days = 30
-        due_date = (_date.today() + _timedelta(days=payment_terms_days)).isoformat()
+        # date.today() (heure locale) melangerait deux fuseaux differents
+        # avec list_overdue_invoices, qui compare toujours a la date UTC du
+        # jour (voir db.py : "Toutes les dates/heures sont stockees en
+        # UTC") - une facture pourrait alors etre jugee en retard un jour
+        # trop tot ou trop tard selon le fuseau de l'utilisateur (bug
+        # trouve a l'audit).
+        due_date = (_datetime.now(_timezone.utc).date() + _timedelta(days=payment_terms_days)).isoformat()
 
         try:
             new_invoice_id = self.db.create_invoice(
                 source_invoice["client_id"], [], tax_rate=source_invoice["tax_rate"],
                 due_date=due_date, line_items=line_items, currency=self._currency(),
+                notes=source_invoice["notes"],
             )
         except ValueError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
@@ -896,6 +916,7 @@ class TempoFactureApp:
                 client_address=client["address"],
                 line_items=line_items,
                 tax_rate=source_invoice["tax_rate"],
+                notes=new_invoice["notes"],
                 currency=new_invoice["currency"],
             )
         except OSError as exc:
