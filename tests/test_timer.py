@@ -61,6 +61,20 @@ class TimerTestCase(unittest.TestCase):
     def test_elapsed_seconds_is_zero_when_not_running(self):
         self.assertEqual(self.timer.elapsed_seconds(), 0.0)
 
+    def test_sleep_gap_seconds_is_zero_when_clocks_agree(self):
+        self.timer.start(self.project_id)
+        self.assertAlmostEqual(self.timer.sleep_gap_seconds(), 0.0, delta=0.5)
+
+    def test_sleep_gap_seconds_detects_wall_clock_drift(self):
+        # Simule une veille Windows : l'horloge murale a avance de 2h alors
+        # que le compteur moniteur (fige pendant la veille) n'a pas bouge.
+        self.timer.start(self.project_id)
+        self.timer._start_wall -= 7200
+        self.assertGreater(self.timer.sleep_gap_seconds(), 7000)
+
+    def test_sleep_gap_seconds_is_zero_when_not_running(self):
+        self.assertEqual(self.timer.sleep_gap_seconds(), 0.0)
+
     def test_format_duration(self):
         self.assertEqual(Timer.format_duration(0), "00:00:00")
         self.assertEqual(Timer.format_duration(3661), "01:01:01")
@@ -78,6 +92,24 @@ class GetIdleSecondsTestCase(unittest.TestCase):
     def test_returns_zero_when_getlastinputinfo_fails(self):
         with patch("ctypes.windll.user32.GetLastInputInfo", return_value=0):
             self.assertEqual(get_idle_seconds(), 0.0)
+
+    def test_handles_32bit_dwtime_wraparound_via_masking(self):
+        # dwTime (DWORD Windows, 32 bits) vient de boucler a zero pendant que
+        # GetTickCount64 (64 bits) continue de grimper : sans le masque sur
+        # 32 bits, la soustraction donnerait un idle enorme/errone au lieu
+        # d'environ 12 secondes.
+        import ctypes as real_ctypes
+        from timer import _LASTINPUTINFO
+
+        def fake_get_last_input_info(ptr):
+            info = real_ctypes.cast(ptr, real_ctypes.POINTER(_LASTINPUTINFO)).contents
+            info.dwTime = 4294960000
+            return 1
+
+        with patch("ctypes.windll.user32.GetLastInputInfo", side_effect=fake_get_last_input_info), \
+             patch("ctypes.windll.kernel32.GetTickCount64", return_value=5000):
+            idle = get_idle_seconds()
+        self.assertAlmostEqual(idle, 12.296, places=2)
 
 
 if __name__ == "__main__":

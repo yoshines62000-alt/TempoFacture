@@ -35,7 +35,13 @@ def get_idle_seconds() -> float:
         # n'etait pas explicitement fixe a c_uint.
         ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
         millis_since_boot = ctypes.windll.kernel32.GetTickCount64()
-        idle_millis = millis_since_boot - info.dwTime
+        # dwTime lui-meme reste un DWORD 32 bits (limite de l'API Windows,
+        # pas de ctypes) : il boucle a zero au bout de ~49.7 jours de temps
+        # de fonctionnement. En ne comparant que les 32 bits de poids faible
+        # des deux compteurs, la soustraction reste correcte meme apres un
+        # tel bouclage (les idles reels sont toujours tres inferieurs a
+        # 49.7 jours, donc aucune ambiguite possible).
+        idle_millis = (millis_since_boot - info.dwTime) & 0xFFFFFFFF
         return max(0.0, idle_millis / 1000.0)
     except (AttributeError, OSError):
         return 0.0
@@ -51,6 +57,7 @@ class Timer:
         self.active_entry_id: Optional[int] = None
         self.project_id: Optional[int] = None
         self._start_monotonic: Optional[float] = None
+        self._start_wall: Optional[float] = None
 
     @property
     def is_running(self) -> bool:
@@ -62,6 +69,7 @@ class Timer:
         self.active_entry_id = self.db.start_time_entry(project_id, description)
         self.project_id = project_id
         self._start_monotonic = time.monotonic()
+        self._start_wall = time.time()
         return self.active_entry_id
 
     def stop(self) -> Optional[int]:
@@ -72,7 +80,21 @@ class Timer:
         self.active_entry_id = None
         self.project_id = None
         self._start_monotonic = None
+        self._start_wall = None
         return entry_id
+
+    def sleep_gap_seconds(self) -> float:
+        """Ecart entre le temps horloge murale ecoule et le temps compteur
+        moniteur ecoule depuis le demarrage. Les compteurs "monotonic" (et
+        GetTickCount64, utilise par get_idle_seconds) se figent pendant une
+        veille/hibernation Windows, contrairement a l'horloge murale - un
+        ecart important signale donc une periode de veille qu'aucun des deux
+        n'a pu detecter comme de l'inactivite active."""
+        if not self.is_running or self._start_wall is None:
+            return 0.0
+        wall_elapsed = time.time() - self._start_wall
+        monotonic_elapsed = time.monotonic() - self._start_monotonic
+        return max(0.0, wall_elapsed - monotonic_elapsed)
 
     def stop_removing_idle_time(self, idle_seconds: float) -> Optional[int]:
         """Arrete le chronometre en cours, mais en reculant l'heure de fin du
@@ -81,9 +103,16 @@ class Timer:
         if not self.is_running:
             return None
         entry_id = self.active_entry_id
-        end_time = time.time() - idle_seconds
         from datetime import datetime, timezone
+        end_time = time.time() - idle_seconds
         end_iso = datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()
+        running = self.db.get_running_entry()
+        if running and end_iso < running["start_time"]:
+            # L'inactivite detectee depasse la duree ecoulee depuis le debut
+            # (ex : l'utilisateur s'est absente des le demarrage) : on ne
+            # recule jamais avant l'heure de debut elle-meme, sinon l'entree
+            # deviendrait invalide (fin avant debut).
+            end_iso = running["start_time"]
         self.db.stop_time_entry(entry_id, end_time_iso=end_iso)
         self.active_entry_id = None
         self.project_id = None

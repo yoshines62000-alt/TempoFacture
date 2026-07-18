@@ -64,6 +64,15 @@ class BuildLineItemsTestCase(unittest.TestCase):
         self.assertEqual(rates, [50.0, 80.0])
 
 
+class LineItemAmountRoundingTestCase(unittest.TestCase):
+    def test_amount_rounds_half_up_on_a_known_binary_float_tie(self):
+        # round() natif de Python arrondirait ce cas precis a 3.12 (round-
+        # half-to-even sur la representation binaire de 0.05*62.5), alors
+        # que le montant correct pour une facture est 3.13.
+        item = inv.LineItem("Projet", hours=0.05, rate=62.5)
+        self.assertEqual(item.amount, 3.13)
+
+
 class ComputeTotalsTestCase(unittest.TestCase):
     def test_totals_with_tax(self):
         items = [inv.LineItem("Projet A", hours=10.0, rate=50.0)]
@@ -133,6 +142,27 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
             tax_rate=0.0,
         )
         self.assertTrue(output_path.exists())
+
+    def test_generates_pdf_with_very_long_project_name_without_overflow_crash(self):
+        # Un nom de projet trop long pour sa colonne doit etre tronque, pas
+        # provoquer un depassement silencieux ou une exception fpdf2.
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_long_nom.pdf"
+        items = [inv.LineItem("Un nom de projet extremement long " * 5, hours=1.0, rate=50.0)]
+        inv.generate_invoice_pdf(
+            output_path=output_path,
+            invoice_number="2026-0004",
+            issue_date="2026-01-15",
+            due_date=None,
+            company_name="Mon Entreprise",
+            company_info="",
+            client_name="Client",
+            client_address="",
+            line_items=items,
+            tax_rate=0.0,
+        )
+        self.assertTrue(output_path.exists())
+        self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
 
     def test_generates_pdf_with_non_latin1_characters_without_crashing(self):
         # Champs libres copies-colles depuis Word/le web : tiret long "—",

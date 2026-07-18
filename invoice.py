@@ -9,8 +9,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Optional
+
+_CENTS = Decimal("0.01")
+
+
+def _round_money(value) -> float:
+    """Arrondit un montant a 2 decimales avec un demi-arrondi "au superieur"
+    (comme attendu sur une facture), en passant par Decimal : round() natif
+    de Python arrondit le float binaire sous-jacent (round-half-to-even sur
+    sa valeur binaire, pas sur sa valeur decimale), ce qui peut sous-facturer
+    de maniere silencieuse sur certaines combinaisons heures/taux (ex :
+    0.05 h a 62.5/h)."""
+    return float(Decimal(str(value)).quantize(_CENTS, rounding=ROUND_HALF_UP))
 
 
 @dataclass
@@ -21,7 +34,7 @@ class LineItem:
 
     @property
     def amount(self) -> float:
-        return round(self.hours * self.rate, 2)
+        return _round_money(Decimal(str(self.hours)) * Decimal(str(self.rate)))
 
 
 def compute_duration_hours(start_iso: str, end_iso: str) -> float:
@@ -40,7 +53,12 @@ def build_line_items(time_entries: list, db) -> list:
         if not entry["end_time"]:
             continue  # une entree en cours (jamais arretee) n'est pas facturable
         project_id = entry["project_id"]
-        hours = compute_duration_hours(entry["start_time"], entry["end_time"])
+        try:
+            hours = compute_duration_hours(entry["start_time"], entry["end_time"])
+        except (ValueError, TypeError):
+            # Horodatage corrompu/mal importe : on exclut cette seule entree
+            # plutot que de faire echouer la facturation de tout le client.
+            continue
         hours_by_project[project_id] = hours_by_project.get(project_id, 0.0) + hours
         names_by_project[project_id] = entry["project_name"]
 
@@ -53,9 +71,10 @@ def build_line_items(time_entries: list, db) -> list:
 
 def compute_totals(line_items: list, tax_rate: float) -> tuple:
     """Renvoie (sous-total, montant de taxe, total), arrondis a 2 decimales."""
-    subtotal = round(sum(li.amount for li in line_items), 2)
-    tax_amount = round(subtotal * tax_rate / 100, 2)
-    total = round(subtotal + tax_amount, 2)
+    subtotal_dec = sum((Decimal(str(li.amount)) for li in line_items), Decimal("0.00"))
+    tax_amount = _round_money(subtotal_dec * Decimal(str(tax_rate)) / Decimal(100))
+    subtotal = float(subtotal_dec)
+    total = _round_money(subtotal_dec + Decimal(str(tax_amount)))
     return subtotal, tax_amount, total
 
 
@@ -101,6 +120,9 @@ def generate_invoice_pdf(
     client_name = _latin1_safe(client_name)
     client_address = _latin1_safe(client_address)
     notes = _latin1_safe(notes)
+    invoice_number = _latin1_safe(invoice_number)
+    issue_date = _latin1_safe(issue_date)
+    due_date = _latin1_safe(due_date) if due_date else due_date
     line_items = [
         LineItem(_latin1_safe(li.project_name), li.hours, li.rate) for li in line_items
     ]
@@ -153,7 +175,16 @@ def generate_invoice_pdf(
 
     pdf.set_font("Helvetica", "", 9)
     for item in line_items:
-        pdf.cell(col_widths[0], 7, item.project_name, border=1)
+        # Un nom de projet trop long deborderait sur les colonnes suivantes
+        # (cell() ne retourne pas a la ligne et n'empeche pas le
+        # depassement) : on le tronque avec une ellipse pour qu'il tienne
+        # dans sa colonne.
+        label = item.project_name
+        while label and pdf.get_string_width(label + "...") > col_widths[0] - 2:
+            label = label[:-1]
+        if label != item.project_name:
+            label += "..."
+        pdf.cell(col_widths[0], 7, label, border=1)
         pdf.cell(col_widths[1], 7, f"{item.hours:.2f} h", border=1, align="R")
         pdf.cell(col_widths[2], 7, format_amount(item.rate, currency) + "/h", border=1, align="R")
         pdf.cell(col_widths[3], 7, format_amount(item.amount, currency), border=1, align="R")

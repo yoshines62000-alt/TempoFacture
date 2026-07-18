@@ -179,6 +179,12 @@ class Database:
     # -- suivi du temps -------------------------------------------------------
 
     def start_time_entry(self, project_id: int, description: str = "") -> int:
+        # Un seul chronometre actif a la fois : sans ce garde-fou, un second
+        # demarrage laisserait une entree "en cours" orpheline qui accumule
+        # du temps indefiniment sans jamais apparaitre comme facturable tant
+        # qu'elle n'est pas explicitement arretee.
+        if self.get_running_entry() is not None:
+            raise RuntimeError("Un chronometre est deja en cours ; arretez-le avant d'en demarrer un autre.")
         cur = self.conn.execute(
             "INSERT INTO time_entries (project_id, start_time, description) VALUES (?, ?, ?)",
             (project_id, _now_iso(), description.strip()),
@@ -187,13 +193,19 @@ class Database:
         return cur.lastrowid
 
     def stop_time_entry(self, entry_id: int, end_time_iso: Optional[str] = None) -> None:
+        end_time_iso = end_time_iso or _now_iso()
+        entry = self.conn.execute("SELECT start_time FROM time_entries WHERE id = ?", (entry_id,)).fetchone()
+        if entry and end_time_iso < entry["start_time"]:
+            raise ValueError("L'heure de fin ne peut pas etre anterieure a l'heure de debut.")
         self.conn.execute(
             "UPDATE time_entries SET end_time = ? WHERE id = ?",
-            (end_time_iso or _now_iso(), entry_id),
+            (end_time_iso, entry_id),
         )
         self.conn.commit()
 
     def add_manual_time_entry(self, project_id: int, start_iso: str, end_iso: str, description: str = "") -> int:
+        if end_iso < start_iso:
+            raise ValueError("L'heure de fin ne peut pas etre anterieure a l'heure de debut.")
         cur = self.conn.execute(
             "INSERT INTO time_entries (project_id, start_time, end_time, description) VALUES (?, ?, ?, ?)",
             (project_id, start_iso, end_iso, description.strip()),
@@ -206,16 +218,30 @@ class Database:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
+        if "start_time" in updates or "end_time" in updates:
+            current = self.conn.execute(
+                "SELECT start_time, end_time FROM time_entries WHERE id = ?", (entry_id,)
+            ).fetchone()
+            if current:
+                start = updates.get("start_time", current["start_time"])
+                end = updates.get("end_time", current["end_time"])
+                if start and end and end < start:
+                    raise ValueError("L'heure de fin ne peut pas etre anterieure a l'heure de debut.")
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         self.conn.execute(f"UPDATE time_entries SET {set_clause} WHERE id = ?", (*updates.values(), entry_id))
         self.conn.commit()
 
     def delete_time_entry(self, entry_id: int) -> None:
+        entry = self.conn.execute("SELECT invoice_id FROM time_entries WHERE id = ?", (entry_id,)).fetchone()
+        if entry and entry["invoice_id"] is not None:
+            raise ValueError("Cette entree a deja ete facturee ; annulez d'abord la facture correspondante.")
         self.conn.execute("DELETE FROM time_entries WHERE id = ?", (entry_id,))
         self.conn.commit()
 
     def get_running_entry(self) -> Optional[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM time_entries WHERE end_time IS NULL LIMIT 1").fetchone()
+        return self.conn.execute(
+            "SELECT * FROM time_entries WHERE end_time IS NULL ORDER BY id LIMIT 1"
+        ).fetchone()
 
     def list_time_entries(
         self,
@@ -271,34 +297,40 @@ class Database:
         # Use the same (UTC) year as issue_date, so the invoice number never
         # disagrees with the date printed on the invoice itself.
         invoice_number = self.next_invoice_number(year=datetime.fromisoformat(issue_date).year)
-        cur = self.conn.execute(
-            """INSERT INTO invoices (client_id, invoice_number, issue_date, due_date, tax_rate, notes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (client_id, invoice_number, issue_date, due_date, tax_rate, notes.strip(), _now_iso()),
-        )
-        invoice_id = cur.lastrowid
-        if time_entry_ids:
-            placeholders = ",".join("?" * len(time_entry_ids))
-            # Restrict to entries whose project actually belongs to this
-            # client: guards against accidentally billing another client's
-            # hours onto this invoice if the caller passes a bad id list.
-            updated = self.conn.execute(
-                f"""UPDATE time_entries SET invoice_id = ?
-                    WHERE id IN ({placeholders})
-                    AND project_id IN (SELECT id FROM projects WHERE client_id = ?)""",
-                (invoice_id, *time_entry_ids, client_id),
-            ).rowcount
-            if updated != len(time_entry_ids):
-                self.conn.rollback()
-                raise ValueError("Certaines entrees de temps n'appartiennent pas a ce client.")
-        # Snapshot the rate/hours used at creation time: if the client's or
-        # project's hourly_rate is edited later, this invoice's total must
-        # stay exactly what was actually billed, not silently change.
-        for item in (line_items or []):
-            self.conn.execute(
-                "INSERT INTO invoice_line_items (invoice_id, project_name, hours, rate) VALUES (?, ?, ?, ?)",
-                (invoice_id, item.project_name, item.hours, item.rate),
+        try:
+            cur = self.conn.execute(
+                """INSERT INTO invoices (client_id, invoice_number, issue_date, due_date, tax_rate, notes, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (client_id, invoice_number, issue_date, due_date, tax_rate, notes.strip(), _now_iso()),
             )
+            invoice_id = cur.lastrowid
+            if time_entry_ids:
+                placeholders = ",".join("?" * len(time_entry_ids))
+                # Restrict to entries whose project actually belongs to this
+                # client: guards against accidentally billing another client's
+                # hours onto this invoice if the caller passes a bad id list.
+                updated = self.conn.execute(
+                    f"""UPDATE time_entries SET invoice_id = ?
+                        WHERE id IN ({placeholders})
+                        AND project_id IN (SELECT id FROM projects WHERE client_id = ?)""",
+                    (invoice_id, *time_entry_ids, client_id),
+                ).rowcount
+                if updated != len(time_entry_ids):
+                    raise ValueError("Certaines entrees de temps n'appartiennent pas a ce client.")
+            # Snapshot the rate/hours used at creation time: if the client's or
+            # project's hourly_rate is edited later, this invoice's total must
+            # stay exactly what was actually billed, not silently change.
+            for item in (line_items or []):
+                self.conn.execute(
+                    "INSERT INTO invoice_line_items (invoice_id, project_name, hours, rate) VALUES (?, ?, ?, ?)",
+                    (invoice_id, item.project_name, item.hours, item.rate),
+                )
+        except Exception:
+            # Toute erreur en cours de creation (id invalide, item malforme...)
+            # annule integralement la facture : jamais de ligne partielle ou
+            # d'heures marquees facturees sans que la facture soit complete.
+            self.conn.rollback()
+            raise
         self.conn.commit()
         return invoice_id
 

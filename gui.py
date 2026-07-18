@@ -140,6 +140,9 @@ class TempoFactureApp:
         except ValueError:
             messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
             return
+        if rate < 0:
+            messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
+            return
         self.db.add_client(name, self.client_email_var.get().strip(), self.client_address_var.get().strip(), rate)
         self.client_name_var.set("")
         self.client_email_var.set("")
@@ -165,6 +168,12 @@ class TempoFactureApp:
         client = self.db.get_client(client_id)
         self.db.update_client(client_id, archived=0 if client["archived"] else 1)
         self._refresh_clients()
+        # Un client archive/desarchive doit disparaitre/reapparaitre partout
+        # ou sa liste est utilisee (projets, chronometre, factures), pas
+        # seulement dans son propre onglet.
+        self._refresh_projects()
+        self._refresh_timer_project_choices()
+        self._refresh_invoices()
 
     # -- onglet Projets -------------------------------------------------------
 
@@ -214,6 +223,9 @@ class TempoFactureApp:
             except ValueError:
                 messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
                 return
+            if rate < 0:
+                messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
+                return
         self.db.add_project(client_id, name, hourly_rate=rate)
         self.project_name_var.set("")
         self.project_rate_var.set("")
@@ -241,6 +253,7 @@ class TempoFactureApp:
         project = self.db.get_project(project_id)
         self.db.update_project(project_id, archived=0 if project["archived"] else 1)
         self._refresh_projects()
+        self._refresh_timer_project_choices()
 
     # -- onglet Chronometre ---------------------------------------------------
 
@@ -340,6 +353,7 @@ class TempoFactureApp:
         started = datetime.fromisoformat(running["start_time"])
         elapsed = (datetime.now(started.tzinfo) - started).total_seconds()
         self.timer._start_monotonic = _time.monotonic() - elapsed
+        self.timer._start_wall = _time.time() - elapsed
         self.timer_start_button.config(state="disabled")
         self.timer_stop_button.config(state="normal")
         self.timer_project_combo.config(state="disabled")
@@ -351,7 +365,12 @@ class TempoFactureApp:
 
     def _check_idle(self):
         if self.timer.is_running and not self._idle_prompt_open:
-            idle = get_idle_seconds()
+            # Ajoute l'ecart eventuel horloge murale / compteur moniteur : ce
+            # dernier (comme GetTickCount64, utilise par get_idle_seconds) se
+            # fige pendant une veille Windows, donc une mise en veille du
+            # poste pendant que le chronometre tourne ne serait autrement
+            # jamais detectee comme de l'inactivite.
+            idle = get_idle_seconds() + self.timer.sleep_gap_seconds()
             if idle >= IDLE_THRESHOLD_SECONDS:
                 self._idle_prompt_open = True
                 minutes = int(idle // 60)
@@ -384,6 +403,13 @@ class TempoFactureApp:
         if hours <= 0:
             messagebox.showwarning(APP_TITLE, "Le nombre d'heures doit etre positif.")
             return
+        if hours > 24:
+            if not messagebox.askyesno(
+                APP_TITLE,
+                f"{hours:g} heures en une seule entree, c'est inhabituel (plus d'une journee complete).\n"
+                "Confirmez-vous que ce nombre est correct ?",
+            ):
+                return
         from datetime import datetime, timedelta, timezone
         end = datetime.now(timezone.utc)
         start = end - timedelta(hours=hours)
@@ -478,6 +504,9 @@ class TempoFactureApp:
         except ValueError:
             messagebox.showwarning(APP_TITLE, "Le taux de TVA doit etre un nombre.")
             return
+        if tax_rate < 0:
+            messagebox.showwarning(APP_TITLE, "Le taux de TVA ne peut pas etre negatif.")
+            return
         entries = self.db.list_time_entries(client_id=client_id, uninvoiced_only=True)
         if not entries:
             messagebox.showinfo(APP_TITLE, "Aucune heure non facturee pour ce client.")
@@ -499,23 +528,37 @@ class TempoFactureApp:
         if not output_path:
             return
 
-        invoice_id = self.db.create_invoice(
-            client_id, [e["id"] for e in entries], tax_rate=tax_rate, line_items=line_items,
-        )
+        try:
+            invoice_id = self.db.create_invoice(
+                client_id, [e["id"] for e in entries], tax_rate=tax_rate, line_items=line_items,
+            )
+        except ValueError as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
+            return
         invoice = self.db.get_invoice(invoice_id)
 
-        generate_invoice_pdf(
-            output_path=Path(output_path),
-            invoice_number=invoice["invoice_number"],
-            issue_date=invoice["issue_date"][:10],
-            due_date=None,
-            company_name=self.db.get_setting("company_name", "Mon entreprise"),
-            company_info=self.db.get_setting("company_info", ""),
-            client_name=client["name"],
-            client_address=client["address"],
-            line_items=line_items,
-            tax_rate=tax_rate,
-        )
+        try:
+            generate_invoice_pdf(
+                output_path=Path(output_path),
+                invoice_number=invoice["invoice_number"],
+                issue_date=invoice["issue_date"][:10],
+                due_date=None,
+                company_name=self.db.get_setting("company_name", "Mon entreprise"),
+                company_info=self.db.get_setting("company_info", ""),
+                client_name=client["name"],
+                client_address=client["address"],
+                line_items=line_items,
+                tax_rate=tax_rate,
+            )
+        except OSError as exc:
+            # Le PDF n'a pas pu etre ecrit (permission refusee, fichier
+            # ouvert ailleurs, disque plein...) : on annule la facture pour
+            # ne jamais laisser une facture "fantome" sans PDF correspondant,
+            # avec des heures verrouillees pour rien.
+            self.db.delete_invoice(invoice_id)
+            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
+            return
+
         self._refresh_invoices()
         self._refresh_time_entries()
         if messagebox.askyesno(APP_TITLE, f"Facture {invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?"):

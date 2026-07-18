@@ -64,6 +64,46 @@ class DatabaseTestCase(unittest.TestCase):
         self.db.stop_time_entry(entry_id)
         self.assertIsNone(self.db.get_running_entry())
 
+    def test_start_time_entry_rejects_second_concurrent_timer(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        self.db.start_time_entry(project_id)
+        with self.assertRaises(RuntimeError):
+            self.db.start_time_entry(project_id)
+
+    def test_stop_time_entry_rejects_end_before_start(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.start_time_entry(project_id)
+        with self.assertRaises(ValueError):
+            self.db.stop_time_entry(entry_id, end_time_iso="2000-01-01T00:00:00+00:00")
+
+    def test_add_manual_time_entry_rejects_end_before_start(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        with self.assertRaises(ValueError):
+            self.db.add_manual_time_entry(
+                project_id, "2026-01-01T11:00:00+00:00", "2026-01-01T09:00:00+00:00"
+            )
+
+    def test_delete_time_entry_rejects_already_invoiced_entry(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.create_invoice(client_id, [entry_id])
+        with self.assertRaises(ValueError):
+            self.db.delete_time_entry(entry_id)
+
+    def test_list_projects_for_active_clients_excludes_archived_client(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        active_ids = [p["id"] for p in self.db.list_projects_for_active_clients()]
+        self.assertIn(project_id, active_ids)
+
+        self.db.update_client(client_id, archived=1)
+        active_ids = [p["id"] for p in self.db.list_projects_for_active_clients()]
+        self.assertNotIn(project_id, active_ids)
+
     def test_only_one_running_entry_is_reported(self):
         client_id = self.db.add_client("Client")
         project_id = self.db.add_project(client_id, "Projet")
