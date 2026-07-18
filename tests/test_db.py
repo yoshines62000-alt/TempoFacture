@@ -242,6 +242,19 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertEqual(len(stored), 1)
         self.assertEqual(stored[0]["rate"], 50.0)  # jamais 90.0 : fige a la creation
 
+    def test_create_invoice_with_no_time_entries_supports_recurring_invoices(self):
+        # Une facture "dupliquee" (facturation recurrente) ne consomme aucune
+        # heure suivie reelle - seules les lignes recopiees comptent.
+        client_id = self.db.add_client("Client")
+        line_items = [LineItem(project_name="Forfait mensuel", hours=10.0, rate=100.0)]
+        invoice_id = self.db.create_invoice(client_id, [], tax_rate=20.0, line_items=line_items)
+        invoice = self.db.get_invoice(invoice_id)
+        self.assertEqual(invoice["client_id"], client_id)
+        stored = self.db.get_invoice_line_items(invoice_id)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["project_name"], "Forfait mensuel")
+        self.assertEqual(stored[0]["hours"], 10.0)
+
     def test_settings_roundtrip(self):
         self.db.set_setting("company_name", "Ma Societe")
         self.assertEqual(self.db.get_setting("company_name"), "Ma Societe")

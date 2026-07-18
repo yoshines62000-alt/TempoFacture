@@ -11,6 +11,7 @@ from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, StringVar, Tk, ttk, messa
 from db import Database
 from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf
 from timer import Timer, get_idle_seconds
+from csv_export import export_time_entries_csv, export_invoices_csv
 
 APP_TITLE = "TempoFacture"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
@@ -163,7 +164,7 @@ class TempoFactureApp:
         for client in self.db.list_clients(include_archived=True):
             self.clients_tree.insert("", END, iid=str(client["id"]), values=(
                 client["id"], client["name"], client["email"],
-                format_amount(client["hourly_rate"]), "Oui" if client["archived"] else "Non",
+                format_amount(client["hourly_rate"], self._currency()), "Oui" if client["archived"] else "Non",
             ))
 
     def _toggle_client_archived(self):
@@ -247,7 +248,7 @@ class TempoFactureApp:
         for project in self.db.list_projects(include_archived=True):
             self.projects_tree.insert("", END, iid=str(project["id"]), values=(
                 project["id"], clients_by_id.get(project["client_id"], "?"), project["name"],
-                format_amount(self.db.effective_hourly_rate(project["id"])),
+                format_amount(self.db.effective_hourly_rate(project["id"]), self._currency()),
                 "Oui" if project["archived"] else "Non",
             ))
 
@@ -315,6 +316,7 @@ class TempoFactureApp:
         entries_actions.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Label(entries_actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(side=LEFT)
         ttk.Button(entries_actions, text="Supprimer l'entree selectionnee", command=self._delete_time_entry).pack(side=RIGHT)
+        ttk.Button(entries_actions, text="Exporter en CSV...", command=self._export_time_entries_csv).pack(side=RIGHT, padx=(0, 6))
 
     def _refresh_timer_project_choices(self):
         # N'affiche que les projets dont le client est actif : un client
@@ -335,6 +337,25 @@ class TempoFactureApp:
                 entry["end_time"][:19].replace("T", " ") if entry["end_time"] else "(en cours)",
                 f"{hours:.2f}" if hours is not None else "-", entry["description"],
             ))
+
+    def _export_time_entries_csv(self):
+        entries = self.db.list_time_entries()
+        if not entries:
+            messagebox.showinfo(APP_TITLE, "Aucune entree de temps a exporter.")
+            return
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            title="Exporter les entrees de temps", initialfile="entrees_de_temps.csv",
+            defaultextension=".csv", filetypes=[("Fichier CSV", "*.csv")],
+        )
+        if not path:
+            return
+        try:
+            export_time_entries_csv(entries, Path(path))
+        except OSError as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible d'exporter le CSV : {exc}")
+            return
+        messagebox.showinfo(APP_TITLE, f"Export termine : {Path(path).name}")
 
     def _start_timer(self):
         if self.timer.is_running:
@@ -578,7 +599,28 @@ class TempoFactureApp:
         ttk.Button(actions, text="Marquer payee", command=lambda: self._set_invoice_status("paid")).pack(side=LEFT)
         ttk.Button(actions, text="Marquer annulee", command=lambda: self._set_invoice_status("cancelled")).pack(side=LEFT, padx=5)
         ttk.Button(actions, text="Marquer non payee", command=lambda: self._set_invoice_status("unpaid")).pack(side=LEFT)
+        ttk.Button(actions, text="Dupliquer (facture recurrente)...", command=self._duplicate_invoice).pack(side=LEFT, padx=5)
         ttk.Button(actions, text="Supprimer (libere les heures)", command=self._delete_invoice).pack(side=RIGHT)
+        ttk.Button(actions, text="Exporter en CSV...", command=self._export_invoices_csv).pack(side=RIGHT, padx=(0, 6))
+
+    def _export_invoices_csv(self):
+        invoices = self.db.list_invoices()
+        if not invoices:
+            messagebox.showinfo(APP_TITLE, "Aucune facture a exporter.")
+            return
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            title="Exporter les factures", initialfile="factures.csv",
+            defaultextension=".csv", filetypes=[("Fichier CSV", "*.csv")],
+        )
+        if not path:
+            return
+        try:
+            export_invoices_csv(invoices, self.db, Path(path))
+        except OSError as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible d'exporter le CSV : {exc}")
+            return
+        messagebox.showinfo(APP_TITLE, f"Export termine : {Path(path).name}")
 
     def _refresh_invoices(self):
         clients, labels = self._client_choices()
@@ -594,7 +636,7 @@ class TempoFactureApp:
             _, _, total = compute_totals(line_items, invoice["tax_rate"])
             self.invoices_tree.insert("", END, iid=str(invoice["id"]), values=(
                 invoice["id"], invoice["invoice_number"], clients_by_id.get(invoice["client_id"], "?"),
-                invoice["issue_date"][:10], format_amount(total), invoice["status"],
+                invoice["issue_date"][:10], format_amount(total, self._currency()), invoice["status"],
             ))
         self._refresh_uninvoiced_preview()
 
@@ -606,7 +648,8 @@ class TempoFactureApp:
         entries = [e for e in self.db.list_time_entries(client_id=client_id, uninvoiced_only=True)]
         for item in build_line_items(entries, self.db):
             self.preview_tree.insert("", END, values=(
-                item.project_name, f"{item.hours:.2f} h", format_amount(item.rate), format_amount(item.amount),
+                item.project_name, f"{item.hours:.2f} h",
+                format_amount(item.rate, self._currency()), format_amount(item.amount, self._currency()),
             ))
 
     def _generate_invoice(self):
@@ -671,6 +714,7 @@ class TempoFactureApp:
                 client_address=client["address"],
                 line_items=line_items,
                 tax_rate=tax_rate,
+                currency=self._currency(),
             )
         except OSError as exc:
             # Le PDF n'a pas pu etre ecrit (permission refusee, fichier
@@ -709,6 +753,83 @@ class TempoFactureApp:
         self._refresh_invoices()
         self._refresh_time_entries()
 
+    def _duplicate_invoice(self):
+        """Cree une nouvelle facture reprenant les memes lignes qu'une facture
+        existante (memes projets/heures/taux figes), pour un client en
+        facturation recurrente (ex : forfait mensuel identique chaque mois).
+        Contrairement a une facture normale, aucune heure suivie n'est
+        consommee - les lignes sont simplement recopiees telles quelles."""
+        invoice_id = self._selected_invoice_id()
+        if invoice_id is None:
+            messagebox.showinfo(APP_TITLE, "Selectionnez une facture a dupliquer d'abord.")
+            return
+        source_invoice = self.db.get_invoice(invoice_id)
+        stored_items = self.db.get_invoice_line_items(invoice_id)
+        if not stored_items:
+            messagebox.showwarning(APP_TITLE, "Cette facture n'a aucune ligne a dupliquer.")
+            return
+        line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
+        client = self.db.get_client(source_invoice["client_id"])
+        if client is None:
+            messagebox.showerror(APP_TITLE, "Le client de cette facture n'existe plus.")
+            return
+
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Creer une nouvelle facture pour '{client['name']}' avec les memes lignes que "
+            f"{source_invoice['invoice_number']} ({len(line_items)} ligne(s)) ?",
+        ):
+            return
+
+        from tkinter import filedialog
+        next_number = self.db.next_invoice_number()
+        output_path = filedialog.asksaveasfilename(
+            title="Enregistrer la nouvelle facture PDF", initialfile=f"Facture_{next_number}.pdf",
+            defaultextension=".pdf", filetypes=[("Fichier PDF", "*.pdf")],
+        )
+        if not output_path:
+            return
+
+        from datetime import date as _date, timedelta as _timedelta
+        try:
+            payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
+        except ValueError:
+            payment_terms_days = 30
+        due_date = (_date.today() + _timedelta(days=payment_terms_days)).isoformat()
+
+        try:
+            new_invoice_id = self.db.create_invoice(
+                source_invoice["client_id"], [], tax_rate=source_invoice["tax_rate"],
+                due_date=due_date, line_items=line_items,
+            )
+        except ValueError as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
+            return
+        new_invoice = self.db.get_invoice(new_invoice_id)
+
+        try:
+            generate_invoice_pdf(
+                output_path=Path(output_path),
+                invoice_number=new_invoice["invoice_number"],
+                issue_date=new_invoice["issue_date"][:10],
+                due_date=new_invoice["due_date"],
+                company_name=self.db.get_setting("company_name", "Mon entreprise"),
+                company_info=self.db.get_setting("company_info", ""),
+                client_name=client["name"],
+                client_address=client["address"],
+                line_items=line_items,
+                tax_rate=source_invoice["tax_rate"],
+                currency=self._currency(),
+            )
+        except OSError as exc:
+            self.db.delete_invoice(new_invoice_id)
+            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
+            return
+
+        self._refresh_invoices()
+        if messagebox.askyesno(APP_TITLE, f"Facture {new_invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?"):
+            webbrowser.open(Path(output_path).resolve().as_uri())
+
     # -- onglet Parametres ----------------------------------------------------
 
     def _build_settings_tab(self):
@@ -719,6 +840,7 @@ class TempoFactureApp:
         self.setting_company_name_var = StringVar(value=self.db.get_setting("company_name"))
         self.setting_company_info_var = StringVar(value=self.db.get_setting("company_info"))
         self.setting_payment_terms_var = StringVar(value=self.db.get_setting("payment_terms_days", "30"))
+        self.setting_currency_var = StringVar(value=self.db.get_setting("currency", "EUR"))
 
         ttk.Label(form, text="Nom de l'entreprise (affiche sur les factures)").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.setting_company_name_var, width=50).grid(row=0, column=1, padx=5)
@@ -726,7 +848,9 @@ class TempoFactureApp:
         ttk.Entry(form, textvariable=self.setting_company_info_var, width=50).grid(row=1, column=1, padx=5)
         ttk.Label(form, text="Delai de paiement par defaut (jours)").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.setting_payment_terms_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
-        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=3, column=1, sticky="e", pady=10)
+        ttk.Label(form, text="Devise (code, ex: EUR, USD, CHF)").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(form, textvariable=self.setting_currency_var, width=10).grid(row=3, column=1, sticky="w", padx=5)
+        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=4, column=1, sticky="e", pady=10)
 
         ttk.Label(
             frame,
@@ -744,10 +868,22 @@ class TempoFactureApp:
         if payment_terms < 0:
             messagebox.showwarning(APP_TITLE, "Le delai de paiement ne peut pas etre negatif.")
             return
+        currency = self.setting_currency_var.get().strip().upper()
+        if not currency:
+            messagebox.showwarning(APP_TITLE, "La devise ne peut pas etre vide.")
+            return
         self.db.set_setting("company_name", self.setting_company_name_var.get().strip())
         self.db.set_setting("company_info", self.setting_company_info_var.get().strip())
         self.db.set_setting("payment_terms_days", str(payment_terms))
+        self.db.set_setting("currency", currency)
+        self._refresh_clients()
+        self._refresh_projects()
+        self._refresh_time_entries()
+        self._refresh_invoices()
         messagebox.showinfo(APP_TITLE, "Parametres enregistres.")
+
+    def _currency(self) -> str:
+        return self.db.get_setting("currency", "EUR")
 
     # -- fermeture ------------------------------------------------------------
 
