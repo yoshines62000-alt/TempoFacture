@@ -600,7 +600,13 @@ class TempoFactureApp:
         ]:
             self.invoices_tree.heading(col, text=label)
             self.invoices_tree.column(col, width=width, anchor="w")
+        self.invoices_tree.tag_configure("overdue", foreground="#c0392b")
         self.invoices_tree.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+        self.overdue_summary_var = StringVar(value="")
+        ttk.Label(frame, textvariable=self.overdue_summary_var, foreground="#c0392b").pack(
+            anchor="w", padx=10, pady=(0, 6)
+        )
 
         actions = ttk.Frame(frame)
         actions.pack(fill=X, padx=10, pady=(0, 10))
@@ -635,6 +641,7 @@ class TempoFactureApp:
         self.invoice_client_combo["values"] = labels
         self.invoices_tree.delete(*self.invoices_tree.get_children())
         clients_by_id = {c["id"]: c["name"] for c in self.db.list_clients(include_archived=True)}
+        overdue_ids = {row["id"] for row in self.db.list_overdue_invoices()}
         for invoice in self.db.list_invoices():
             # Reconstruit les lignes a partir du snapshot fige a la creation
             # de la facture (pas des taux horaires actuels des projets), pour
@@ -642,11 +649,24 @@ class TempoFactureApp:
             stored_items = self.db.get_invoice_line_items(invoice["id"])
             line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
             _, _, total = compute_totals(line_items, invoice["tax_rate"])
+            status_label = "en retard" if invoice["id"] in overdue_ids else invoice["status"]
+            tags = ("overdue",) if invoice["id"] in overdue_ids else ()
             self.invoices_tree.insert("", END, iid=str(invoice["id"]), values=(
                 invoice["id"], invoice["invoice_number"], clients_by_id.get(invoice["client_id"], "?"),
-                invoice["issue_date"][:10], format_amount(total, invoice["currency"]), invoice["status"],
-            ))
+                invoice["issue_date"][:10], format_amount(total, invoice["currency"]), status_label,
+            ), tags=tags)
+        self._refresh_overdue_summary(overdue_ids)
         self._refresh_uninvoiced_preview()
+
+    def _refresh_overdue_summary(self, overdue_ids):
+        if not overdue_ids:
+            self.overdue_summary_var.set("")
+            return
+        count = len(overdue_ids)
+        plural = "s" if count > 1 else ""
+        self.overdue_summary_var.set(
+            f"{count} facture{plural} en retard de paiement (echeance depassee)"
+        )
 
     def _refresh_uninvoiced_preview(self):
         self.preview_tree.delete(*self.preview_tree.get_children())

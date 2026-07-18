@@ -335,6 +335,47 @@ class DatabaseTestCase(unittest.TestCase):
         new_id = reopened.create_invoice(1, [], line_items=[LineItem("Forfait", 1.0, 50.0)])
         self.assertEqual(reopened.get_invoice(new_id)["currency"], "EUR")
 
+    def test_list_overdue_invoices_finds_unpaid_past_due_date(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        invoice_id = self.db.create_invoice(client_id, [entry_id], due_date="2026-01-15")
+        overdue = self.db.list_overdue_invoices(as_of="2026-02-01")
+        self.assertEqual([row["id"] for row in overdue], [invoice_id])
+
+    def test_list_overdue_invoices_excludes_invoices_not_yet_due(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.create_invoice(client_id, [entry_id], due_date="2026-03-01")
+        overdue = self.db.list_overdue_invoices(as_of="2026-02-01")
+        self.assertEqual(overdue, [])
+
+    def test_list_overdue_invoices_excludes_paid_invoices(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        invoice_id = self.db.create_invoice(client_id, [entry_id], due_date="2026-01-15")
+        self.db.set_invoice_status(invoice_id, "paid")
+        overdue = self.db.list_overdue_invoices(as_of="2026-02-01")
+        self.assertEqual(overdue, [])
+
+    def test_list_overdue_invoices_excludes_invoices_without_due_date(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.create_invoice(client_id, [entry_id])  # pas de due_date
+        overdue = self.db.list_overdue_invoices(as_of="2026-02-01")
+        self.assertEqual(overdue, [])
+
+    def test_list_overdue_invoices_defaults_to_today_when_as_of_omitted(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.create_invoice(client_id, [entry_id], due_date="2000-01-01")  # tres passe
+        overdue = self.db.list_overdue_invoices()
+        self.assertEqual(len(overdue), 1)
+
     def test_settings_roundtrip(self):
         self.db.set_setting("company_name", "Ma Societe")
         self.assertEqual(self.db.get_setting("company_name"), "Ma Societe")

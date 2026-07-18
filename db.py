@@ -399,6 +399,23 @@ class Database:
         self.conn.execute("UPDATE invoices SET status = ? WHERE id = ?", (status, invoice_id))
         self.conn.commit()
 
+    def list_overdue_invoices(self, as_of: Optional[str] = None) -> list:
+        """Factures non payees dont l'echeance (due_date) est deja passee.
+        `as_of` (date ISO, par defaut aujourd'hui) est un parametre explicite
+        plutot qu'un appel interne a `date.today()`, pour que les tests
+        restent deterministes sans avoir a manipuler l'horloge systeme.
+        Une facture sans due_date (champ optionnel, voir create_invoice)
+        n'est jamais consideree en retard : on ne peut pas etre en retard sur
+        une echeance qui n'a jamais ete fixee."""
+        if as_of is None:
+            as_of = datetime.now(timezone.utc).date().isoformat()
+        return self.conn.execute(
+            """SELECT * FROM invoices
+               WHERE status = 'unpaid' AND due_date IS NOT NULL AND due_date != '' AND due_date < ?
+               ORDER BY due_date ASC""",
+            (as_of,),
+        ).fetchall()
+
     def delete_invoice(self, invoice_id: int) -> None:
         # Libere les entrees de temps associees (elles redeviennent facturables)
         # plutot que de les supprimer : annuler une facture ne doit jamais
