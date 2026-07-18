@@ -525,13 +525,21 @@ class TempoFactureApp:
             messagebox.showwarning(APP_TITLE, "Le nombre d'heures doit etre positif.")
             return
 
-        from datetime import datetime, timedelta
-        end = datetime.fromisoformat(entry["end_time"])
-        start = end - timedelta(hours=hours)
+        update_kwargs = {"description": result["description"]}
+        # N'envoyer start_time/end_time que si les heures ont reellement ete
+        # modifiees : update_time_entry refuse tout changement d'horaires
+        # sur une entree deja facturee, mais une simple correction de
+        # description doit rester possible meme sur une entree facturee -
+        # renvoyer ces deux champs a l'identique (meme non modifies)
+        # bloquerait donc a tort cette correction (bug trouve a l'audit).
+        if abs(hours - current_hours) > 0.005:
+            from datetime import datetime, timedelta
+            end = datetime.fromisoformat(entry["end_time"])
+            start = end - timedelta(hours=hours)
+            update_kwargs["start_time"] = start.isoformat()
+            update_kwargs["end_time"] = end.isoformat()
         try:
-            self.db.update_time_entry(
-                entry_id, start_time=start.isoformat(), end_time=end.isoformat(), description=result["description"]
-            )
+            self.db.update_time_entry(entry_id, **update_kwargs)
         except ValueError as exc:
             messagebox.showwarning(APP_TITLE, str(exc))
             return
