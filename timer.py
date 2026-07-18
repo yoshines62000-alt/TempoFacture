@@ -1,0 +1,103 @@
+"""Moteur de suivi du temps + detection d'inactivite (Windows, via ctypes).
+
+La detection d'inactivite ne fait QUE mesurer le temps ecoule depuis la
+derniere activite clavier/souris (un compteur), elle n'enregistre jamais ce
+qui a ete tape ou clique - meme principe de confidentialite que dans les
+autres outils de cette suite : aucune capture de frappe.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import time
+from typing import Optional
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+def get_idle_seconds() -> float:
+    """Secondes ecoulees depuis la derniere activite clavier/souris,
+    n'importe ou sur le systeme (pas seulement dans cette application).
+    Renvoie 0.0 si l'information est indisponible (plateforme non-Windows,
+    appel echoue)."""
+    try:
+        info = _LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        # GetTickCount64 renvoie un compteur 64 bits (millisecondes depuis le
+        # demarrage), qui ne boucle jamais en pratique (~584 millions
+        # d'annees) - contrairement a GetTickCount (32 bits), qui boucle
+        # au bout de ~49.7 jours et dont ctypes lirait meme le retour comme
+        # un entier signe (negatif) au bout de ~24.8 jours si son restype
+        # n'etait pas explicitement fixe a c_uint.
+        ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+        millis_since_boot = ctypes.windll.kernel32.GetTickCount64()
+        idle_millis = millis_since_boot - info.dwTime
+        return max(0.0, idle_millis / 1000.0)
+    except (AttributeError, OSError):
+        return 0.0
+
+
+class Timer:
+    """Chronometre relie a la base de donnees : demarre/arrete une entree de
+    temps reelle (persistee), garde en memoire uniquement l'instant de
+    demarrage pour calculer le temps ecoule affiche a l'ecran."""
+
+    def __init__(self, db):
+        self.db = db
+        self.active_entry_id: Optional[int] = None
+        self.project_id: Optional[int] = None
+        self._start_monotonic: Optional[float] = None
+
+    @property
+    def is_running(self) -> bool:
+        return self.active_entry_id is not None
+
+    def start(self, project_id: int, description: str = "") -> int:
+        if self.is_running:
+            raise RuntimeError("Un chronometre est deja en cours ; arretez-le avant d'en demarrer un autre.")
+        self.active_entry_id = self.db.start_time_entry(project_id, description)
+        self.project_id = project_id
+        self._start_monotonic = time.monotonic()
+        return self.active_entry_id
+
+    def stop(self) -> Optional[int]:
+        if not self.is_running:
+            return None
+        entry_id = self.active_entry_id
+        self.db.stop_time_entry(entry_id)
+        self.active_entry_id = None
+        self.project_id = None
+        self._start_monotonic = None
+        return entry_id
+
+    def stop_removing_idle_time(self, idle_seconds: float) -> Optional[int]:
+        """Arrete le chronometre en cours, mais en reculant l'heure de fin du
+        temps d'inactivite detecte - pour ne pas facturer un client pendant
+        que l'utilisateur etait absent de son poste."""
+        if not self.is_running:
+            return None
+        entry_id = self.active_entry_id
+        end_time = time.time() - idle_seconds
+        from datetime import datetime, timezone
+        end_iso = datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()
+        self.db.stop_time_entry(entry_id, end_time_iso=end_iso)
+        self.active_entry_id = None
+        self.project_id = None
+        self._start_monotonic = None
+        return entry_id
+
+    def elapsed_seconds(self) -> float:
+        if self._start_monotonic is None:
+            return 0.0
+        return time.monotonic() - self._start_monotonic
+
+    @staticmethod
+    def format_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"

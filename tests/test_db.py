@@ -1,0 +1,198 @@
+"""Tests pour db.py : schema SQLite, CRUD, calcul du taux horaire effectif,
+numerotation des factures, liberation des heures lors de la suppression
+d'une facture."""
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from db import Database
+from invoice import LineItem
+
+
+class DatabaseTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = Database(self.tmp / "test.sqlite")
+        self.addCleanup(self.db.close)
+
+    def test_add_and_get_client(self):
+        client_id = self.db.add_client("Acme Corp", "contact@acme.test", "1 rue de la Paix", 50.0)
+        client = self.db.get_client(client_id)
+        self.assertEqual(client["name"], "Acme Corp")
+        self.assertEqual(client["hourly_rate"], 50.0)
+
+    def test_list_clients_excludes_archived_by_default(self):
+        active = self.db.add_client("Actif")
+        archived = self.db.add_client("Archive")
+        self.db.update_client(archived, archived=1)
+        names = [c["name"] for c in self.db.list_clients()]
+        self.assertIn("Actif", names)
+        self.assertNotIn("Archive", names)
+        # Mais consultable explicitement si demande.
+        all_names = [c["name"] for c in self.db.list_clients(include_archived=True)]
+        self.assertIn("Archive", all_names)
+
+    def test_project_uses_own_rate_when_set(self):
+        client_id = self.db.add_client("Client", hourly_rate=40.0)
+        project_id = self.db.add_project(client_id, "Site web", hourly_rate=60.0)
+        self.assertEqual(self.db.effective_hourly_rate(project_id), 60.0)
+
+    def test_project_falls_back_to_client_rate_when_unset(self):
+        client_id = self.db.add_client("Client", hourly_rate=40.0)
+        project_id = self.db.add_project(client_id, "Site web")  # pas de taux propre
+        self.assertEqual(self.db.effective_hourly_rate(project_id), 40.0)
+
+    def test_project_rate_of_zero_overrides_client_rate(self):
+        # Un taux de 0 (prestation offerte) doit etre distingue de "non
+        # defini" (None) - il ne doit jamais retomber sur le taux du client.
+        client_id = self.db.add_client("Client", hourly_rate=40.0)
+        project_id = self.db.add_project(client_id, "Projet gratuit", hourly_rate=0.0)
+        self.assertEqual(self.db.effective_hourly_rate(project_id), 0.0)
+
+    def test_start_and_stop_time_entry(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.start_time_entry(project_id, "Travail en cours")
+        running = self.db.get_running_entry()
+        self.assertIsNotNone(running)
+        self.assertEqual(running["id"], entry_id)
+
+        self.db.stop_time_entry(entry_id)
+        self.assertIsNone(self.db.get_running_entry())
+
+    def test_only_one_running_entry_is_reported(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        self.db.start_time_entry(project_id)
+        self.assertIsNotNone(self.db.get_running_entry())
+
+    def test_list_time_entries_filters_by_project_and_client(self):
+        client_a = self.db.add_client("Client A")
+        client_b = self.db.add_client("Client B")
+        project_a = self.db.add_project(client_a, "Projet A")
+        project_b = self.db.add_project(client_b, "Projet B")
+        self.db.add_manual_time_entry(project_a, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        self.db.add_manual_time_entry(project_b, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+
+        by_project = self.db.list_time_entries(project_id=project_a)
+        self.assertEqual(len(by_project), 1)
+
+        by_client = self.db.list_time_entries(client_id=client_b)
+        self.assertEqual(len(by_client), 1)
+        self.assertEqual(by_client[0]["project_name"], "Projet B")
+
+    def test_invoice_numbering_increments_per_year(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        e1 = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        e2 = self.db.add_manual_time_entry(project_id, "2026-01-02T09:00:00+00:00", "2026-01-02T10:00:00+00:00")
+
+        first_number = self.db.next_invoice_number(year=2026)
+        self.assertEqual(first_number, "2026-0001")
+
+        invoice_id_1 = self.db.create_invoice(client_id, [e1], tax_rate=20.0)
+        invoice_1 = self.db.get_invoice(invoice_id_1)
+        self.assertEqual(invoice_1["invoice_number"], "2026-0001")
+
+        invoice_id_2 = self.db.create_invoice(client_id, [e2], tax_rate=20.0)
+        invoice_2 = self.db.get_invoice(invoice_id_2)
+        self.assertEqual(invoice_2["invoice_number"], "2026-0002")
+
+    def test_create_invoice_marks_time_entries_as_invoiced(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+
+        uninvoiced_before = self.db.list_time_entries(uninvoiced_only=True)
+        self.assertEqual(len(uninvoiced_before), 1)
+
+        self.db.create_invoice(client_id, [entry_id], tax_rate=0.0)
+
+        uninvoiced_after = self.db.list_time_entries(uninvoiced_only=True)
+        self.assertEqual(len(uninvoiced_after), 0)
+
+    def test_delete_invoice_releases_time_entries_for_reinvoicing(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        invoice_id = self.db.create_invoice(client_id, [entry_id], tax_rate=0.0)
+
+        self.assertEqual(len(self.db.list_time_entries(uninvoiced_only=True)), 0)
+
+        self.db.delete_invoice(invoice_id)
+
+        # Le temps redevient facturable, il n'est pas perdu.
+        uninvoiced = self.db.list_time_entries(uninvoiced_only=True)
+        self.assertEqual(len(uninvoiced), 1)
+        self.assertEqual(uninvoiced[0]["id"], entry_id)
+        self.assertIsNone(self.db.get_invoice(invoice_id))
+
+    def test_create_invoice_rejects_time_entries_from_other_client(self):
+        client_a = self.db.add_client("Client A")
+        client_b = self.db.add_client("Client B")
+        project_a = self.db.add_project(client_a, "Projet A")
+        entry_id = self.db.add_manual_time_entry(project_a, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+
+        with self.assertRaises(ValueError):
+            self.db.create_invoice(client_b, [entry_id])  # l'entree appartient a client_a, pas client_b
+
+        # L'entree ne doit pas avoir ete marquee facturee malgre l'echec.
+        self.assertEqual(len(self.db.list_time_entries(uninvoiced_only=True)), 1)
+
+    def test_invoice_number_not_reused_after_deleting_an_invoice(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        e1 = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        e2 = self.db.add_manual_time_entry(project_id, "2026-01-02T09:00:00+00:00", "2026-01-02T10:00:00+00:00")
+        e3 = self.db.add_manual_time_entry(project_id, "2026-01-03T09:00:00+00:00", "2026-01-03T10:00:00+00:00")
+
+        invoice_1 = self.db.create_invoice(client_id, [e1])  # 2026-0001
+        invoice_2 = self.db.create_invoice(client_id, [e2])  # 2026-0002
+        self.db.delete_invoice(invoice_1)  # libere le numero 0001, mais ne doit pas etre reemis
+
+        invoice_3 = self.db.create_invoice(client_id, [e3])
+        number_3 = self.db.get_invoice(invoice_3)["invoice_number"]
+        number_2 = self.db.get_invoice(invoice_2)["invoice_number"]
+        self.assertNotEqual(number_3, number_2)
+        self.assertEqual(number_3, "2026-0003")
+
+    def test_set_invoice_status_rejects_invalid_value(self):
+        client_id = self.db.add_client("Client")
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        invoice_id = self.db.create_invoice(client_id, [entry_id])
+        with self.assertRaises(ValueError):
+            self.db.set_invoice_status(invoice_id, "statut_invalide")
+
+    def test_invoice_line_items_are_frozen_after_rate_change(self):
+        client_id = self.db.add_client("Client", hourly_rate=50.0)
+        project_id = self.db.add_project(client_id, "Projet")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00")
+
+        line_items = [LineItem(project_name="Projet", hours=2.0, rate=50.0)]
+        invoice_id = self.db.create_invoice(client_id, [entry_id], line_items=line_items)
+
+        # Le taux du client augmente APRES la creation de la facture.
+        self.db.update_client(client_id, hourly_rate=90.0)
+
+        stored = self.db.get_invoice_line_items(invoice_id)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["rate"], 50.0)  # jamais 90.0 : fige a la creation
+
+    def test_settings_roundtrip(self):
+        self.db.set_setting("company_name", "Ma Societe")
+        self.assertEqual(self.db.get_setting("company_name"), "Ma Societe")
+        self.assertEqual(self.db.get_setting("inconnu", default="valeur_par_defaut"), "valeur_par_defaut")
+
+    def test_settings_update_overwrites_previous_value(self):
+        self.db.set_setting("company_name", "Ancien Nom")
+        self.db.set_setting("company_name", "Nouveau Nom")
+        self.assertEqual(self.db.get_setting("company_name"), "Nouveau Nom")
+
+
+if __name__ == "__main__":
+    unittest.main()

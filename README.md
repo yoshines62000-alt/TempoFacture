@@ -1,0 +1,166 @@
+# TempoFacture
+
+[![Dernière version](https://img.shields.io/github/v/release/yoshines62000-alt/TempoFacture?label=derni%C3%A8re%20version)](https://github.com/yoshines62000-alt/TempoFacture/releases/latest)
+[![Téléchargements](https://img.shields.io/github/downloads/yoshines62000-alt/TempoFacture/total?label=t%C3%A9l%C3%A9chargements)](https://github.com/yoshines62000-alt/TempoFacture/releases/latest)
+
+**[⬇️ Télécharger l'exécutable (.exe) — aucune installation requise](https://github.com/yoshines62000-alt/TempoFacture/releases/latest)**
+
+Suivi du temps, gestion de clients/projets et facturation PDF pour
+freelances — gratuit, open source, et 100 % local. Alternative libre à des
+outils comme [Harvest](https://www.getharvest.com/),
+[Toggl](https://toggl.com/) ou [RescueTime](https://www.rescuetime.com/),
+qui facturent un abonnement mensuel pour ces mêmes fonctions de base (et dont
+les tarifs peuvent grimper brutalement après un rachat — Harvest a été
+racheté par Bending Spoons en 2025, avec des hausses de prix rapportées
+allant jusqu'à x10).
+
+Créez vos clients et projets, chronométrez votre travail (ou saisissez des
+heures manuellement), puis générez une facture PDF professionnelle en un
+clic à partir des heures non encore facturées.
+
+## Fonctionnalités
+
+- **Clients et projets** : chaque client a un taux horaire par défaut,
+  chaque projet peut définir son propre taux (sinon celui du client
+  s'applique). Archivage sans perte de l'historique.
+- **Chronomètre en un clic** : démarrez/arrêtez le suivi du temps par
+  projet, avec description libre. Le chronomètre en cours survit à une
+  fermeture/réouverture de l'application (il repart de l'heure de
+  démarrage réelle enregistrée en base).
+- **Détection d'inactivité** : si vous restez inactif plusieurs minutes
+  pendant qu'un chronomètre tourne, l'application le signale et propose de
+  retirer ce temps mort — pour ne jamais facturer un client pendant une
+  pause. Comme pour les autres outils de cette suite, **aucune frappe
+  clavier n'est jamais enregistrée** : seule la durée d'inactivité est
+  mesurée (une simple horloge système), jamais le contenu tapé.
+- **Saisie manuelle** : ajoutez directement un nombre d'heures à un projet,
+  sans passer par le chronomètre.
+- **Facturation PDF** : sélectionnez un client, générez en un clic une
+  facture PDF regroupant toutes les heures non encore facturées par
+  projet, avec calcul automatique de la TVA et du total.
+- **Suivi des statuts** : marquez une facture comme payée, non payée ou
+  annulée. Annuler une facture ne fait jamais perdre du temps déjà suivi :
+  les heures redeviennent facturables.
+- **100 % local, zéro cloud** : toutes les données (clients, projets,
+  temps, factures) sont stockées dans une base SQLite locale. Aucun compte,
+  aucune connexion internet requise.
+- **Gratuit et open source, pour toujours** : pas de version payante, pas
+  de fonctionnalité verrouillée derrière un abonnement.
+
+## Démarrage rapide
+
+1. [**Téléchargez `TempoFacture.exe`**](https://github.com/yoshines62000-alt/TempoFacture/releases/latest)
+   depuis la dernière release.
+2. Double-cliquez dessus : la fenêtre de l'application s'ouvre directement,
+   sans installation, sans Python.
+
+L'exécutable n'étant pas signé numériquement, Windows SmartScreen peut
+afficher un avertissement au premier lancement : cliquez sur **Informations
+complémentaires** puis **Exécuter quand même**.
+
+## Lancer depuis le code source
+
+Alternative à l'exécutable, pour les développeurs ou par souci de
+transparence (voir [Installation](#installation) pour les dépendances) :
+double-cliquez sur **[`Lancer.vbs`](Lancer.vbs)** — la fenêtre s'ouvre
+directement, sans console. Vous pouvez créer un raccourci sur le Bureau (clic
+droit sur `Lancer.vbs` → Envoyer vers → Bureau) pour un accès en un clic.
+
+## Installation
+
+Nécessite Python 3.9+ avec Tkinter (inclus dans les installations standard de
+Python sous Windows), plus une dépendance légère :
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+- **[fpdf2](https://py-pdf.github.io/fpdf2/)** : génération des factures PDF,
+  pure Python, sans binaire externe requis.
+
+## Utilisation
+
+1. Onglet **Clients** : ajoutez vos clients (nom, email, adresse, taux
+   horaire par défaut).
+2. Onglet **Projets** : créez un projet rattaché à un client, avec un taux
+   horaire propre si besoin (sinon celui du client s'applique).
+3. Onglet **Chronomètre** : choisissez un projet, cliquez sur **Démarrer**,
+   travaillez, cliquez sur **Arrêter**. Vous pouvez aussi ajouter des heures
+   manuellement.
+4. Onglet **Factures** : choisissez un client, la liste des heures non
+   facturées s'affiche automatiquement avec le montant estimé. Renseignez
+   la TVA, cliquez sur **Générer la facture (PDF)**, choisissez où
+   l'enregistrer.
+5. Onglet **Paramètres** : renseignez le nom et les informations de votre
+   entreprise, affichés sur chaque facture générée.
+
+## Confidentialité
+
+- Aucune donnée ne quitte votre machine : pas de compte, pas de serveur, pas
+  de télémétrie.
+- La détection d'inactivité mesure uniquement une durée (via l'horloge
+  système Windows) — elle n'enregistre jamais ce qui est tapé ou cliqué.
+- Les données sont stockées dans `%APPDATA%\TempoFacture\tempofacture.sqlite`.
+
+## Créer un exécutable autonome (.exe)
+
+Pour distribuer l'outil sans que le destinataire ait besoin d'installer
+Python ni les dépendances, un exécutable Windows autonome peut être généré
+avec [PyInstaller](https://pyinstaller.org/) :
+
+```bash
+python -m pip install pyinstaller
+python -m PyInstaller TempoFacture.spec
+```
+
+L'exécutable est produit dans `dist/TempoFacture.exe` (fichier unique, sans
+console). Le fichier `.spec` du dépôt fixe la configuration de build pour un
+résultat reproductible. Les dossiers `build/` et `dist/` ne sont pas suivis
+par Git.
+
+## Tests
+
+Une suite de tests automatisés couvre la logique pure (base de données,
+calcul des lignes de facture, génération de PDF, chronomètre) avec des
+scénarios réels (vraie base SQLite temporaire, vrai PDF généré sur disque).
+
+```bash
+python -m unittest discover tests -v
+```
+
+## Structure du projet
+
+```
+db.py                 # couche donnees SQLite : clients, projets, temps, factures
+invoice.py            # calcul des lignes de facture et generation du PDF (fpdf2)
+timer.py              # moteur de chronometre + detection d'inactivite (ctypes)
+gui.py                # interface graphique Tkinter
+tests/                 # tests automatises
+requirements.txt      # dependances (fpdf2)
+Lancer.vbs            # raccourci de lancement double-clic (sans console)
+Lancer.bat            # raccourci de lancement double-clic (avec console, pour debug)
+TempoFacture.spec     # configuration de build PyInstaller (.exe autonome)
+icon.ico              # icone de l'application et de l'executable
+.gitignore
+LICENSE               # licence MIT
+README.md
+```
+
+## Licence
+
+Ce projet est publié sous licence [MIT](LICENSE) : gratuit, open source, et
+libre de réutilisation, modification et redistribution.
+
+## Soutenir le projet
+
+<div align="center">
+
+**Cet outil est gratuit, open source, et le restera toujours.**
+Pas de version payante, pas de fonctionnalité cachée derrière un paywall.
+
+Si TempoFacture vous fait gagner du temps sur votre suivi d'activité et
+votre facturation, un petit café est toujours très apprécié. 🙌
+
+[![Offrez-moi un café sur Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/yoshines62000)
+
+</div>
