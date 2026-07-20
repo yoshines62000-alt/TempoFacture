@@ -9,7 +9,7 @@ from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, StringVar, Tk, ttk, messagebox, simpledialog
 
 from db import Database
-from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf
+from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf, reexport_invoice_pdf
 from timer import Timer, get_idle_seconds
 from csv_export import export_time_entries_csv, export_invoices_csv
 
@@ -627,6 +627,7 @@ class TempoFactureApp:
         ttk.Button(actions, text="Marquer annulee", command=lambda: self._set_invoice_status("cancelled")).pack(side=LEFT, padx=5)
         ttk.Button(actions, text="Marquer non payee", command=lambda: self._set_invoice_status("unpaid")).pack(side=LEFT)
         ttk.Button(actions, text="Dupliquer (facture recurrente)...", command=self._duplicate_invoice).pack(side=LEFT, padx=5)
+        ttk.Button(actions, text="Reexporter le PDF...", command=self._reexport_invoice_pdf).pack(side=LEFT)
         ttk.Button(actions, text="Supprimer (libere les heures)", command=self._delete_invoice).pack(side=RIGHT)
         ttk.Button(actions, text="Exporter en CSV...", command=self._export_invoices_csv).pack(side=RIGHT, padx=(0, 6))
 
@@ -926,6 +927,43 @@ class TempoFactureApp:
 
         self._refresh_invoices()
         if messagebox.askyesno(APP_TITLE, f"Facture {new_invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?"):
+            webbrowser.open(Path(output_path).resolve().as_uri())
+
+    def _reexport_invoice_pdf(self):
+        invoice_id = self._selected_invoice_id()
+        if invoice_id is None:
+            messagebox.showinfo(APP_TITLE, "Selectionnez une facture d'abord.")
+            return
+        invoice = self.db.get_invoice(invoice_id)
+
+        from tkinter import filedialog
+        output_path = filedialog.asksaveasfilename(
+            title="Reexporter la facture PDF",
+            initialfile=f"Facture_{invoice['invoice_number']}.pdf",
+            defaultextension=".pdf", filetypes=[("Fichier PDF", "*.pdf")],
+        )
+        if not output_path:
+            return
+
+        try:
+            reexport_invoice_pdf(
+                self.db, invoice_id, Path(output_path),
+                company_name=self.db.get_setting("company_name", "Mon entreprise"),
+                company_info=self.db.get_setting("company_info", ""),
+            )
+        except (OSError, ValueError) as exc:
+            # Contrairement a _generate_invoice, aucune facture n'a ete creee
+            # en base : il n'y a donc rien a annuler en cas d'echec.
+            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre : {exc}")
+            return
+
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Facture {invoice['invoice_number']} reexportee.\n"
+            "Montants, dates et notes sont ceux figes a l'emission ;\n"
+            "seules les coordonnees actuelles du client sont utilisees.",
+        )
+        if messagebox.askyesno(APP_TITLE, "Ouvrir le PDF maintenant ?"):
             webbrowser.open(Path(output_path).resolve().as_uri())
 
     # -- onglet Parametres ----------------------------------------------------

@@ -210,3 +210,37 @@ def generate_invoice_pdf(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pdf.output(str(output_path))
+
+
+def reexport_invoice_pdf(db, invoice_id: int, output_path: Path, company_name: str, company_info: str) -> None:
+    """Regenere le PDF d'une facture deja emise (copie perdue, fichier
+    supprime...) exclusivement a partir des champs figes en base a la
+    creation : numero, dates, taux de TVA, devise, notes et lignes (voir
+    Database.create_invoice). Aucune ecriture en base : reexporter ne
+    consomme ni numero ni heures. Seules exceptions au gel : le nom et
+    l'adresse du client ne sont pas historises en base, ce sont donc leurs
+    valeurs actuelles qui apparaissent sur le PDF reexporte."""
+    invoice = db.get_invoice(invoice_id)
+    if invoice is None:
+        raise ValueError(f"facture introuvable : {invoice_id}")
+    client = db.get_client(invoice["client_id"])
+    if client is None:
+        raise ValueError(f"client introuvable pour la facture {invoice['invoice_number']}")
+    line_items = [
+        LineItem(row["project_name"], row["hours"], row["rate"])
+        for row in db.get_invoice_line_items(invoice_id)
+    ]
+    generate_invoice_pdf(
+        output_path=output_path,
+        invoice_number=invoice["invoice_number"],
+        issue_date=invoice["issue_date"][:10],
+        due_date=invoice["due_date"],
+        company_name=company_name,
+        company_info=company_info,
+        client_name=client["name"],
+        client_address=client["address"],
+        line_items=line_items,
+        tax_rate=invoice["tax_rate"],
+        notes=invoice["notes"],
+        currency=invoice["currency"],
+    )

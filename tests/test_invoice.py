@@ -189,5 +189,57 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
         self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
 
 
+class ReexportInvoicePdfTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = Database(self.tmp / "test.sqlite")
+        self.addCleanup(self.db.close)
+        self.client_id = self.db.add_client("Client Test", address="1 rue de la Paix", hourly_rate=50.0)
+        self.project_id = self.db.add_project(self.client_id, "Projet A")
+        entry_id = self.db.add_manual_time_entry(
+            self.project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00"
+        )
+        entries = self.db.list_time_entries(project_id=self.project_id)
+        line_items = inv.build_line_items(entries, self.db)
+        self.invoice_id = self.db.create_invoice(
+            self.client_id, [entry_id], tax_rate=20.0, line_items=line_items
+        )
+
+    def test_reexport_produces_a_pdf_with_totals_frozen_despite_rate_change(self):
+        # Le taux du projet change APRES l'emission de la facture : le PDF
+        # reexporte doit refleter les montants d'origine (lignes figees en
+        # base), jamais le nouveau taux.
+        self.db.update_project(self.project_id, hourly_rate=90.0)
+        output_path = self.tmp / "reexport.pdf"
+
+        inv.reexport_invoice_pdf(self.db, self.invoice_id, output_path, "Mon Entreprise", "SIRET 123")
+
+        self.assertTrue(output_path.exists())
+        self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
+        stored = self.db.get_invoice_line_items(self.invoice_id)
+        items = [inv.LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored]
+        invoice = self.db.get_invoice(self.invoice_id)
+        subtotal, tax_amount, total = inv.compute_totals(items, invoice["tax_rate"])
+        self.assertEqual(subtotal, 100.0)  # 2 h x 50, jamais 2 h x 90
+        self.assertEqual(total, 120.0)
+
+    def test_reexport_writes_nothing_to_the_database(self):
+        # Reexporter ne doit ni consommer un numero de facture, ni creer de
+        # ligne, ni toucher aux entrees de temps.
+        invoices_before = [dict(row) for row in self.db.list_invoices()]
+        entries_before = [dict(row) for row in self.db.list_time_entries()]
+        next_number_before = self.db.next_invoice_number(year=2026)
+
+        inv.reexport_invoice_pdf(self.db, self.invoice_id, self.tmp / "r.pdf", "Mon Entreprise", "")
+
+        self.assertEqual([dict(row) for row in self.db.list_invoices()], invoices_before)
+        self.assertEqual([dict(row) for row in self.db.list_time_entries()], entries_before)
+        self.assertEqual(self.db.next_invoice_number(year=2026), next_number_before)
+
+    def test_reexport_unknown_invoice_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            inv.reexport_invoice_pdf(self.db, 999, self.tmp / "absent.pdf", "Mon Entreprise", "")
+
+
 if __name__ == "__main__":
     unittest.main()
