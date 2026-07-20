@@ -15,7 +15,7 @@ from csv_export import export_time_entries_csv, export_invoices_csv
 
 APP_TITLE = "TempoFacture"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-IDLE_THRESHOLD_SECONDS = 5 * 60  # au-dela, on propose de retirer le temps d'inactivite
+IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
 IDLE_CHECK_INTERVAL_MS = 15_000
 
 
@@ -124,6 +124,13 @@ class TempoFactureApp:
         )
         ttk.Button(form, text="Ajouter le client", command=self._add_client).grid(row=1, column=5, pady=(5, 0))
 
+        search_row = ttk.Frame(frame)
+        search_row.pack(fill=X, padx=10, pady=(0, 5))
+        ttk.Label(search_row, text="Rechercher :").pack(side=LEFT)
+        self.client_search_var = StringVar()
+        ttk.Entry(search_row, textvariable=self.client_search_var, width=30).pack(side=LEFT, padx=5)
+        self.client_search_var.trace_add("write", lambda *_: self._refresh_clients())
+
         columns = ("id", "name", "email", "rate", "archived")
         self.clients_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
         for col, label, width in [
@@ -161,7 +168,10 @@ class TempoFactureApp:
 
     def _refresh_clients(self):
         self.clients_tree.delete(*self.clients_tree.get_children())
+        query = self.client_search_var.get().strip().lower() if hasattr(self, "client_search_var") else ""
         for client in self.db.list_clients(include_archived=True):
+            if query and query not in client["name"].lower() and query not in client["email"].lower():
+                continue
             self.clients_tree.insert("", END, iid=str(client["id"]), values=(
                 client["id"], client["name"], client["email"],
                 format_amount(client["hourly_rate"], self._currency()), "Oui" if client["archived"] else "Non",
@@ -174,7 +184,28 @@ class TempoFactureApp:
             return
         client_id = int(selection[0])
         client = self.db.get_client(client_id)
-        self.db.update_client(client_id, archived=0 if client["archived"] else 1)
+        archiving = not client["archived"]
+        if archiving:
+            # Archiver un client le fait disparaitre du combo de l'onglet
+            # Factures (_refresh_invoices/_generate_invoice utilisent
+            # list_clients(), qui exclut les clients archives par defaut) :
+            # ses heures non facturees resteraient alors invisibles alors
+            # qu'elles existent toujours en base. Meme piege que celui deja
+            # documente pour les projets (voir list_projects_for_active_clients
+            # ci-dessus), mais pour l'archivage direct d'un client.
+            uninvoiced = self.db.list_time_entries(client_id=client_id, uninvoiced_only=True)
+            if uninvoiced:
+                count = len(uninvoiced)
+                plural = "s" if count > 1 else ""
+                if not messagebox.askyesno(
+                    APP_TITLE,
+                    f"Ce client a {count} heure{plural} non facturee{plural}.\n"
+                    "Une fois archive, il n'apparaitra plus dans l'onglet Factures et ces heures "
+                    "resteront invisibles tant qu'il n'est pas desarchive.\n\n"
+                    "Archiver quand meme ?",
+                ):
+                    return
+        self.db.update_client(client_id, archived=1 if archiving else 0)
         self._refresh_clients()
         # Un client archive/desarchive doit disparaitre/reapparaitre partout
         # ou sa liste est utilisee (projets, chronometre, factures), pas
@@ -202,6 +233,13 @@ class TempoFactureApp:
         ttk.Label(form, text="Taux (optionnel)").grid(row=0, column=4, sticky="w")
         ttk.Entry(form, textvariable=self.project_rate_var, width=10).grid(row=0, column=5, padx=5)
         ttk.Button(form, text="Ajouter le projet", command=self._add_project).grid(row=0, column=6, padx=5)
+
+        search_row = ttk.Frame(frame)
+        search_row.pack(fill=X, padx=10, pady=(0, 5))
+        ttk.Label(search_row, text="Rechercher :").pack(side=LEFT)
+        self.project_search_var = StringVar()
+        ttk.Entry(search_row, textvariable=self.project_search_var, width=30).pack(side=LEFT, padx=5)
+        self.project_search_var.trace_add("write", lambda *_: self._refresh_projects())
 
         columns = ("id", "client", "name", "rate", "archived")
         self.projects_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
@@ -245,9 +283,13 @@ class TempoFactureApp:
         self.project_client_combo["values"] = client_labels
         self.projects_tree.delete(*self.projects_tree.get_children())
         clients_by_id = {c["id"]: c["name"] for c in self.db.list_clients(include_archived=True)}
+        query = self.project_search_var.get().strip().lower() if hasattr(self, "project_search_var") else ""
         for project in self.db.list_projects(include_archived=True):
+            client_name = clients_by_id.get(project["client_id"], "?")
+            if query and query not in project["name"].lower() and query not in client_name.lower():
+                continue
             self.projects_tree.insert("", END, iid=str(project["id"]), values=(
-                project["id"], clients_by_id.get(project["client_id"], "?"), project["name"],
+                project["id"], client_name, project["name"],
                 format_amount(self.db.effective_hourly_rate(project["id"]), self._currency()),
                 "Oui" if project["archived"] else "Non",
             ))
@@ -409,7 +451,7 @@ class TempoFactureApp:
             # poste pendant que le chronometre tourne ne serait autrement
             # jamais detectee comme de l'inactivite.
             idle = get_idle_seconds() + self.timer.sleep_gap_seconds()
-            if idle >= IDLE_THRESHOLD_SECONDS:
+            if idle >= self._idle_threshold_seconds():
                 self._idle_prompt_open = True
                 minutes = int(idle // 60)
                 answer = messagebox.askyesno(
@@ -605,6 +647,13 @@ class TempoFactureApp:
 
         ttk.Separator(frame).pack(fill=X, padx=10)
 
+        invoice_search_row = ttk.Frame(frame)
+        invoice_search_row.pack(fill=X, padx=10, pady=(10, 5))
+        ttk.Label(invoice_search_row, text="Rechercher :").pack(side=LEFT)
+        self.invoice_search_var = StringVar()
+        ttk.Entry(invoice_search_row, textvariable=self.invoice_search_var, width=30).pack(side=LEFT, padx=5)
+        self.invoice_search_var.trace_add("write", lambda *_: self._refresh_invoices())
+
         columns = ("id", "number", "client", "date", "total", "status")
         self.invoices_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
         for col, label, width in [
@@ -690,17 +739,22 @@ class TempoFactureApp:
         self.invoices_tree.delete(*self.invoices_tree.get_children())
         clients_by_id = {c["id"]: c["name"] for c in self.db.list_clients(include_archived=True)}
         overdue_ids = {row["id"] for row in self.db.list_overdue_invoices()}
+        query = self.invoice_search_var.get().strip().lower() if hasattr(self, "invoice_search_var") else ""
         for invoice in self.db.list_invoices():
+            client_name = clients_by_id.get(invoice["client_id"], "?")
+            status_label = "en retard" if invoice["id"] in overdue_ids else invoice["status"]
+            if query and query not in invoice["invoice_number"].lower() and query not in client_name.lower() \
+                    and query not in status_label.lower():
+                continue
             # Reconstruit les lignes a partir du snapshot fige a la creation
             # de la facture (pas des taux horaires actuels des projets), pour
             # qu'un total affiche ici ne change jamais apres coup.
             stored_items = self.db.get_invoice_line_items(invoice["id"])
             line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
             _, _, total = compute_totals(line_items, invoice["tax_rate"])
-            status_label = "en retard" if invoice["id"] in overdue_ids else invoice["status"]
             tags = ("overdue",) if invoice["id"] in overdue_ids else ()
             self.invoices_tree.insert("", END, iid=str(invoice["id"]), values=(
-                invoice["id"], invoice["invoice_number"], clients_by_id.get(invoice["client_id"], "?"),
+                invoice["id"], invoice["invoice_number"], client_name,
                 invoice["issue_date"][:10], format_amount(total, invoice["currency"]), status_label,
             ), tags=tags)
         self._refresh_overdue_summary(overdue_ids)
@@ -996,6 +1050,9 @@ class TempoFactureApp:
         self.setting_company_info_var = StringVar(value=self.db.get_setting("company_info"))
         self.setting_payment_terms_var = StringVar(value=self.db.get_setting("payment_terms_days", "30"))
         self.setting_currency_var = StringVar(value=self.db.get_setting("currency", "EUR"))
+        self.setting_idle_threshold_var = StringVar(
+            value=self.db.get_setting("idle_threshold_minutes", str(IDLE_THRESHOLD_SECONDS // 60))
+        )
 
         ttk.Label(form, text="Nom de l'entreprise (affiche sur les factures)").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.setting_company_name_var, width=50).grid(row=0, column=1, padx=5)
@@ -1005,7 +1062,9 @@ class TempoFactureApp:
         ttk.Entry(form, textvariable=self.setting_payment_terms_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
         ttk.Label(form, text="Devise (code, ex: EUR, USD, CHF)").grid(row=3, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.setting_currency_var, width=10).grid(row=3, column=1, sticky="w", padx=5)
-        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=4, column=1, sticky="e", pady=10)
+        ttk.Label(form, text="Seuil d'inactivite du chronometre (minutes)").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(form, textvariable=self.setting_idle_threshold_var, width=10).grid(row=4, column=1, sticky="w", padx=5)
+        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=5, column=1, sticky="e", pady=10)
 
         ttk.Label(
             frame,
@@ -1074,10 +1133,19 @@ class TempoFactureApp:
         if not currency:
             messagebox.showwarning(APP_TITLE, "La devise ne peut pas etre vide.")
             return
+        try:
+            idle_threshold_minutes = int(self.setting_idle_threshold_var.get().strip() or 0)
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "Le seuil d'inactivite doit etre un nombre entier de minutes.")
+            return
+        if idle_threshold_minutes < 1:
+            messagebox.showwarning(APP_TITLE, "Le seuil d'inactivite doit etre d'au moins 1 minute.")
+            return
         self.db.set_setting("company_name", self.setting_company_name_var.get().strip())
         self.db.set_setting("company_info", self.setting_company_info_var.get().strip())
         self.db.set_setting("payment_terms_days", str(payment_terms))
         self.db.set_setting("currency", currency)
+        self.db.set_setting("idle_threshold_minutes", str(idle_threshold_minutes))
         self._refresh_clients()
         self._refresh_projects()
         self._refresh_time_entries()
@@ -1086,6 +1154,18 @@ class TempoFactureApp:
 
     def _currency(self) -> str:
         return self.db.get_setting("currency", "EUR")
+
+    def _idle_threshold_seconds(self) -> int:
+        # Meme mecanisme de stockage/lecture que les autres reglages
+        # (payment_terms_days, currency...) : une valeur texte dans la table
+        # settings, relue a chaque appel plutot que mise en cache, pour
+        # refleter immediatement un changement enregistre depuis l'onglet
+        # Parametres.
+        try:
+            minutes = int(self.db.get_setting("idle_threshold_minutes", str(IDLE_THRESHOLD_SECONDS // 60)) or 0)
+        except ValueError:
+            minutes = IDLE_THRESHOLD_SECONDS // 60
+        return max(1, minutes) * 60
 
     # -- fermeture ------------------------------------------------------------
 

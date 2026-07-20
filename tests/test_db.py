@@ -454,6 +454,74 @@ class DatabaseTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.backup_to(aliased)
 
+    def test_schema_creates_indexes_on_foreign_keys(self):
+        # Sans ces index, chaque filtre/jointure sur une cle etrangere
+        # (time_entries.project_id, time_entries.invoice_id,
+        # projects.client_id, invoices.client_id) force un scan complet de
+        # la table concernee.
+        index_names = {
+            row["name"]
+            for row in self.db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        expected = {
+            "idx_time_entries_project_id",
+            "idx_time_entries_invoice_id",
+            "idx_projects_client_id",
+            "idx_invoices_client_id",
+        }
+        self.assertTrue(expected.issubset(index_names))
+
+    def test_reopening_a_pre_index_database_file_adds_the_missing_indexes(self):
+        # Meme logique de migration additive que pour la colonne currency :
+        # une base existante (creee avant l'ajout des index) ne doit ni
+        # planter a la reouverture, ni rester sans les nouveaux index.
+        self.db.close()
+        import sqlite3
+
+        old_style_path = self.tmp / "old_no_index.sqlite"
+        conn = sqlite3.connect(str(old_style_path))
+        conn.executescript("""
+            CREATE TABLE clients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
+                address TEXT NOT NULL DEFAULT '', hourly_rate REAL NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            );
+            CREATE TABLE projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, name TEXT NOT NULL,
+                hourly_rate REAL, archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            );
+            CREATE TABLE time_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, start_time TEXT NOT NULL,
+                end_time TEXT, description TEXT NOT NULL DEFAULT '', invoice_id INTEGER
+            );
+            CREATE TABLE invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, invoice_number TEXT NOT NULL UNIQUE,
+                issue_date TEXT NOT NULL, due_date TEXT, tax_rate REAL NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'unpaid', created_at TEXT NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'EUR'
+            );
+            CREATE TABLE invoice_line_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL, project_name TEXT NOT NULL,
+                hours REAL NOT NULL, rate REAL NOT NULL
+            );
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        conn.commit()
+        conn.close()
+
+        reopened = Database(old_style_path)
+        self.addCleanup(reopened.close)
+        index_names = {
+            row["name"]
+            for row in reopened.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        self.assertIn("idx_time_entries_project_id", index_names)
+        self.assertIn("idx_invoices_client_id", index_names)
+
     def test_backup_to_a_hard_link_of_the_live_path_raises(self):
         # Regression trouvee a l'audit : resolve() ne detecte jamais un
         # lien physique (hard link) vers le meme fichier, puisqu'un lien

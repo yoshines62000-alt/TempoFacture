@@ -22,25 +22,50 @@ clic à partir des heures non encore facturées.
 
 - **Clients et projets** : chaque client a un taux horaire par défaut,
   chaque projet peut définir son propre taux (sinon celui du client
-  s'applique). Archivage sans perte de l'historique.
+  s'applique). Archivage sans perte de l'historique — archiver un client
+  qui a encore des heures non facturées déclenche un avertissement
+  explicite, pour ne jamais les perdre de vue par inadvertance.
+- **Recherche instantanée** : un champ de recherche au-dessus des listes
+  de clients, de projets et de factures filtre les lignes affichées en
+  temps réel (nom, email, client associé, numéro de facture, statut...).
 - **Chronomètre en un clic** : démarrez/arrêtez le suivi du temps par
   projet, avec description libre. Le chronomètre en cours survit à une
   fermeture/réouverture de l'application (il repart de l'heure de
   démarrage réelle enregistrée en base).
-- **Détection d'inactivité** : si vous restez inactif plusieurs minutes
-  pendant qu'un chronomètre tourne, l'application le signale et propose de
-  retirer ce temps mort — pour ne jamais facturer un client pendant une
-  pause. Comme pour les autres outils de cette suite, **aucune frappe
-  clavier n'est jamais enregistrée** : seule la durée d'inactivité est
-  mesurée (une simple horloge système), jamais le contenu tapé.
+- **Détection d'inactivité** : si vous restez inactif pendant qu'un
+  chronomètre tourne, l'application le signale et propose de retirer ce
+  temps mort — pour ne jamais facturer un client pendant une pause. Le
+  seuil de déclenchement (5 minutes par défaut) se règle depuis l'onglet
+  **Paramètres**. Comme pour les autres outils de cette suite, **aucune
+  frappe clavier n'est jamais enregistrée** : seule la durée d'inactivité
+  est mesurée (une simple horloge système), jamais le contenu tapé.
 - **Saisie manuelle** : ajoutez directement un nombre d'heures à un projet,
   sans passer par le chronomètre.
 - **Facturation PDF** : sélectionnez un client, générez en un clic une
   facture PDF regroupant toutes les heures non encore facturées par
   projet, avec calcul automatique de la TVA et du total.
+- **Modèles de notes réutilisables** : enregistrez un texte de note (ex :
+  conditions de paiement, message de remerciement) sous un nom, puis
+  réappliquez-le en un clic sur une future facture au lieu de le
+  retaper.
+- **Facturation récurrente** : dupliquez une facture existante pour
+  générer une nouvelle facture PDF reprenant exactement les mêmes lignes
+  (mêmes projets, heures et taux) — pratique pour un forfait mensuel
+  identique d'un mois sur l'autre, sans consommer de nouvelles heures
+  suivies.
+- **Réexport PDF** : régénérez le PDF d'une facture déjà émise (fichier
+  perdu, à renvoyer...) sans rien changer aux montants, dates ou notes
+  figés à l'émission ; seules les coordonnées actuelles du client sont
+  reprises.
+- **Alerte factures en retard** : les factures non payées dont l'échéance
+  est dépassée sont mises en évidence (couleur + compteur récapitulatif)
+  dans l'onglet Factures.
 - **Suivi des statuts** : marquez une facture comme payée, non payée ou
   annulée. Annuler une facture ne fait jamais perdre du temps déjà suivi :
   les heures redeviennent facturables.
+- **Export CSV** : exportez les entrées de temps ou l'historique des
+  factures au format CSV (compatible Excel, avec BOM UTF-8), pour les
+  transmettre à un comptable ou les analyser dans un tableur.
 - **100 % local, zéro cloud** : toutes les données (clients, projets,
   temps, factures) sont stockées dans une base SQLite locale. Aucun compte,
   aucune connexion internet requise.
@@ -92,7 +117,8 @@ python -m pip install -r requirements.txt
    la TVA, cliquez sur **Générer la facture (PDF)**, choisissez où
    l'enregistrer.
 5. Onglet **Paramètres** : renseignez le nom et les informations de votre
-   entreprise, affichés sur chaque facture générée.
+   entreprise (affichés sur chaque facture générée), le délai de paiement
+   par défaut, la devise, et le seuil d'inactivité du chronomètre.
 
 ## Confidentialité
 

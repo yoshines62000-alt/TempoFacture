@@ -117,6 +117,15 @@ class Database:
             key TEXT PRIMARY KEY,
             value TEXT
         );
+
+        -- Index sur les cles etrangeres : sans eux, chaque jointure/filtre
+        -- (list_time_entries par projet/client, list_projects par client,
+        -- list_invoices par client, liberation des entrees a la suppression
+        -- d'une facture...) force un scan complet de la table concernee.
+        CREATE INDEX IF NOT EXISTS idx_time_entries_project_id ON time_entries(project_id);
+        CREATE INDEX IF NOT EXISTS idx_time_entries_invoice_id ON time_entries(invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_projects_client_id ON projects(client_id);
+        CREATE INDEX IF NOT EXISTS idx_invoices_client_id ON invoices(client_id);
         """)
         self.conn.commit()
         # currency a ete ajoutee apres la sortie initiale : les bases SQLite
