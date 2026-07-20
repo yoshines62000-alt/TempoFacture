@@ -34,6 +34,20 @@ class Database:
     def close(self) -> None:
         self.conn.close()
 
+    def backup_to(self, dest_path: Path) -> None:
+        """Copie coherente de la base active vers `dest_path`, via l'API de
+        sauvegarde native de sqlite3 (fonctionne meme connexion ouverte,
+        sans verrouiller la base source). Refuse d'ecraser la base active
+        elle-meme (comparaison des chemins RESOLUS pour attraper aussi un
+        alias comme "..\\tempofacture.sqlite")."""
+        if Path(dest_path).resolve() == self.path.resolve():
+            raise ValueError("La destination ne peut pas etre le fichier de donnees actif.")
+        dest_conn = sqlite3.connect(str(dest_path))
+        try:
+            self.conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+
     def _create_schema(self) -> None:
         self.conn.executescript("""
         CREATE TABLE IF NOT EXISTS clients (

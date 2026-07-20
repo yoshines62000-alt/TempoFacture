@@ -995,6 +995,45 @@ class TempoFactureApp:
             justify=LEFT,
         ).pack(anchor="w", padx=10, pady=20)
 
+        backup_frame = ttk.LabelFrame(frame, text="Sauvegarde", padding=10)
+        backup_frame.pack(fill=X, padx=10, pady=(0, 10))
+        ttk.Label(
+            backup_frame,
+            text="Toutes les factures et heures tiennent dans un seul fichier : sauvegardez-le\n"
+                 "regulierement pour ne rien perdre en cas de probleme disque.",
+            justify=LEFT,
+        ).pack(anchor="w", pady=(0, 8))
+        buttons = ttk.Frame(backup_frame)
+        buttons.pack(anchor="w")
+        ttk.Button(buttons, text="Sauvegarder les donnees...", command=self._backup_database).pack(side=LEFT)
+        ttk.Button(buttons, text="Ouvrir le dossier de donnees", command=self._open_data_dir).pack(side=LEFT, padx=(6, 0))
+
+    def _backup_database(self):
+        from datetime import date
+        from tkinter import filedialog
+        default_name = f"tempofacture-sauvegarde-{date.today().isoformat()}.sqlite"
+        path = filedialog.asksaveasfilename(
+            title="Sauvegarder les donnees", initialfile=default_name,
+            defaultextension=".sqlite", filetypes=[("Base SQLite", "*.sqlite")],
+        )
+        if not path:
+            return
+        try:
+            self.db.backup_to(Path(path))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(APP_TITLE, f"Impossible d'enregistrer la sauvegarde : {exc}")
+            return
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Sauvegarde enregistree :\n{path}\n\n"
+            "Pour restaurer : fermez TempoFacture, puis remplacez le fichier de donnees "
+            "actif par cette copie.",
+        )
+
+    def _open_data_dir(self):
+        import os
+        os.startfile(_data_dir())  # nosec - ouverture Explorateur Windows d'un dossier local
+
     def _save_settings(self):
         try:
             payment_terms = int(self.setting_payment_terms_var.get().strip() or 0)

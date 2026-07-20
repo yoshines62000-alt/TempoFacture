@@ -417,6 +417,42 @@ class DatabaseTestCase(unittest.TestCase):
         self.db.set_setting("company_name", "Nouveau Nom")
         self.assertEqual(self.db.get_setting("company_name"), "Nouveau Nom")
 
+    def test_backup_to_copies_all_data_to_a_new_file(self):
+        client_id = self.db.add_client("Acme Corp", hourly_rate=50.0)
+        project_id = self.db.add_project(client_id, "Site web")
+        entry_id = self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00")
+        invoice_id = self.db.create_invoice(client_id, [entry_id])
+
+        backup_path = self.tmp / "backup.sqlite"
+        self.db.backup_to(backup_path)
+
+        copy = Database(backup_path)
+        self.addCleanup(copy.close)
+        self.assertEqual(copy.get_client(client_id)["name"], "Acme Corp")
+        self.assertEqual(copy.get_project(project_id)["name"], "Site web")
+        self.assertIsNotNone(copy.get_invoice(invoice_id))
+
+    def test_backup_to_is_independent_of_later_writes(self):
+        self.db.add_client("Avant la sauvegarde")
+        backup_path = self.tmp / "backup.sqlite"
+        self.db.backup_to(backup_path)
+        self.db.add_client("Apres la sauvegarde")
+
+        copy = Database(backup_path)
+        self.addCleanup(copy.close)
+        names = {c["name"] for c in copy.list_clients()}
+        self.assertIn("Avant la sauvegarde", names)
+        self.assertNotIn("Apres la sauvegarde", names)
+
+    def test_backup_to_the_live_path_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.backup_to(self.db.path)
+
+    def test_backup_to_the_live_path_spelled_differently_still_raises(self):
+        aliased = self.db.path.parent / ".." / self.db.path.parent.name / self.db.path.name
+        with self.assertRaises(ValueError):
+            self.db.backup_to(aliased)
+
 
 if __name__ == "__main__":
     unittest.main()

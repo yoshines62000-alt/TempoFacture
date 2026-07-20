@@ -102,6 +102,16 @@ python -m pip install -r requirements.txt
   système Windows) — elle n'enregistre jamais ce qui est tapé ou cliqué.
 - Les données sont stockées dans `%APPDATA%\TempoFacture\tempofacture.sqlite`.
 
+## Sauvegarde et restauration
+
+- Onglet **Paramètres > Sauvegarde** : le bouton « Sauvegarder les
+  données... » enregistre une copie complète du fichier de données à
+  l'emplacement de votre choix.
+- Pour restaurer une sauvegarde : fermez TempoFacture, puis remplacez le
+  fichier `%APPDATA%\TempoFacture\tempofacture.sqlite` par la copie de
+  sauvegarde (le bouton « Ouvrir le dossier de données » y accède
+  directement).
+
 ## Créer un exécutable autonome (.exe)
 
 Pour distribuer l'outil sans que le destinataire ait besoin d'installer
