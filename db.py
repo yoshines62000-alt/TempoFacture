@@ -8,6 +8,7 @@ La conversion vers l'heure locale ne se fait qu'a l'affichage (gui.py).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,10 +39,24 @@ class Database:
         """Copie coherente de la base active vers `dest_path`, via l'API de
         sauvegarde native de sqlite3 (fonctionne meme connexion ouverte,
         sans verrouiller la base source). Refuse d'ecraser la base active
-        elle-meme (comparaison des chemins RESOLUS pour attraper aussi un
-        alias comme "..\\tempofacture.sqlite")."""
-        if Path(dest_path).resolve() == self.path.resolve():
+        elle-meme : comparaison des chemins RESOLUS (attrape un alias
+        comme "..\\tempofacture.sqlite") ET, si la destination existe deja,
+        comparaison d'identite de fichier via os.path.samefile (attrape un
+        LIEN PHYSIQUE - hard link - vers le meme fichier, que resolve() ne
+        detecte jamais puisqu'un lien physique n'est pas un point de
+        reparse a suivre ; bug trouve a l'audit : sans cette deuxieme
+        verification, sqlite3 tentait d'ouvrir une seconde connexion vers
+        le fichier physique deja ouvert par self.conn et restait bloque
+        indefiniment en attente du verrou, gelant toute l'application)."""
+        dest_path = Path(dest_path)
+        if dest_path.resolve() == self.path.resolve():
             raise ValueError("La destination ne peut pas etre le fichier de donnees actif.")
+        if dest_path.exists():
+            try:
+                if os.path.samefile(dest_path, self.path):
+                    raise ValueError("La destination ne peut pas etre le fichier de donnees actif.")
+            except OSError:
+                pass  # comparaison impossible (permissions...) : on laisse la suite echouer normalement
         dest_conn = sqlite3.connect(str(dest_path))
         try:
             self.conn.backup(dest_conn)

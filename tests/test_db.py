@@ -2,6 +2,7 @@
 numerotation des factures, liberation des heures lors de la suppression
 d'une facture."""
 
+import os
 import sys
 import tempfile
 import unittest
@@ -452,6 +453,18 @@ class DatabaseTestCase(unittest.TestCase):
         aliased = self.db.path.parent / ".." / self.db.path.parent.name / self.db.path.name
         with self.assertRaises(ValueError):
             self.db.backup_to(aliased)
+
+    def test_backup_to_a_hard_link_of_the_live_path_raises(self):
+        # Regression trouvee a l'audit : resolve() ne detecte jamais un
+        # lien physique (hard link) vers le meme fichier, puisqu'un lien
+        # physique n'est pas un point de reparse a suivre. Sans la
+        # verification d'identite via os.path.samefile, backup_to tentait
+        # d'ouvrir une seconde connexion vers le fichier physique deja
+        # ouvert et restait bloque indefiniment.
+        hardlink = self.db.path.parent / "hardlink.sqlite"
+        os.link(self.db.path, hardlink)
+        with self.assertRaises(ValueError):
+            self.db.backup_to(hardlink)
 
 
 if __name__ == "__main__":

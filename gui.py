@@ -855,6 +855,13 @@ class TempoFactureApp:
             messagebox.showinfo(APP_TITLE, "Selectionnez une facture a dupliquer d'abord.")
             return
         source_invoice = self.db.get_invoice(invoice_id)
+        if source_invoice is None:
+            # Meme garde-fou que _reexport_invoice_pdf, pour la meme raison
+            # (facture supprimee entre l'affichage de la liste et ce clic) :
+            # peu probable en usage normal, mais moins cher a verifier
+            # explicitement que d'en debattre.
+            messagebox.showwarning(APP_TITLE, "Cette facture n'existe plus.")
+            return
         stored_items = self.db.get_invoice_line_items(invoice_id)
         if not stored_items:
             messagebox.showwarning(APP_TITLE, "Cette facture n'a aucune ligne a dupliquer.")
@@ -935,6 +942,18 @@ class TempoFactureApp:
             messagebox.showinfo(APP_TITLE, "Selectionnez une facture d'abord.")
             return
         invoice = self.db.get_invoice(invoice_id)
+        if invoice is None:
+            # La facture selectionnee a ete supprimee entre le moment ou
+            # elle a ete affichee dans la liste et ce clic (bug trouve a
+            # l'audit : rare en usage normal mais atteignable, par ex. une
+            # seconde instance de l'app pointant sur le meme fichier de
+            # donnees) - sans cette verification, invoice['invoice_number']
+            # ci-dessous plantait avec un TypeError au lieu d'un message
+            # clair (reexport_invoice_pdf, lui, gere deja proprement ce cas
+            # via un ValueError, mais on ne l'atteint jamais : le plantage
+            # a lieu avant, en construisant le nom de fichier par defaut).
+            messagebox.showwarning(APP_TITLE, "Cette facture n'existe plus.")
+            return
 
         from tkinter import filedialog
         output_path = filedialog.asksaveasfilename(
@@ -1018,9 +1037,17 @@ class TempoFactureApp:
         )
         if not path:
             return
+        import sqlite3
         try:
             self.db.backup_to(Path(path))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # sqlite3.Error en plus d'OSError/ValueError (bug trouve a
+            # l'audit) : sqlite3.connect() sur une destination inaccessible
+            # (dossier disparu, lecteur demonte, chemin verrouille) leve un
+            # sqlite3.OperationalError, qui n'est PAS une sous-classe
+            # d'OSError - sans ce clause, ce cas pourtant tres plausible
+            # (cle USB retiree entre l'ouverture du dialogue et le clic)
+            # remontait comme un plantage non gere au lieu d'un message clair.
             messagebox.showerror(APP_TITLE, f"Impossible d'enregistrer la sauvegarde : {exc}")
             return
         messagebox.showinfo(
