@@ -3,11 +3,13 @@ factures et parametres, tous relies a la meme base SQLite locale."""
 
 from __future__ import annotations
 
+import queue
 import sys
 import webbrowser
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, StringVar, Tk, ttk, messagebox, simpledialog
 
+import update_checker
 from db import Database
 from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf, reexport_invoice_pdf
 from timer import Timer, get_idle_seconds
@@ -15,6 +17,9 @@ from csv_export import export_time_entries_csv, export_invoices_csv
 
 APP_TITLE = "TempoFacture"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
+APP_VERSION = "1.0.8"
+UPDATE_REPO = "yoshines62000-alt/TempoFacture"
+RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
 IDLE_CHECK_INTERVAL_MS = 15_000
 
@@ -48,9 +53,17 @@ class TempoFactureApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        self.update_status_var = StringVar(value="")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
+
+        self._update_check_queue = queue.Queue()
+        update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
+        self.root.after(500, self._poll_update_check)
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
@@ -82,6 +95,22 @@ class TempoFactureApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick_timer()
         self._check_idle()
+
+    def _poll_update_check(self):
+        try:
+            status, tag = self._update_check_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(500, self._poll_update_check)
+            return
+        if status == "update_available":
+            self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
+            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
+        elif status == "up_to_date":
+            self.update_status_var.set("A jour")
+            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+        # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
+        # revendique rien plutot que d'afficher a tort "a jour".
 
     # -- utilitaires communs ------------------------------------------------
 
