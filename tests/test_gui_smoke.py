@@ -188,6 +188,93 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app.invoice_search_var.set("introuvable")
         self.assertEqual(len(self.app.invoices_tree.get_children()), 0)
 
+    # -- item audit Phase 1 : pas de facture fantome avec une devise --------
+    # -- contenant un caractere hors Latin-1 ---------------------------------
+
+    def test_generating_invoice_with_non_latin1_currency_creates_no_phantom_invoice(self):
+        # Reproduit le scenario de l'audit : la devise en Parametres contient
+        # "€" (aucune validation ne l'empeche cote GUI, seulement "non
+        # vide"). Avant correctif, generate_invoice_pdf() plantait avec une
+        # exception d'encodage qui n'etait pas un OSError, donc echappait au
+        # bloc try/except OSError de _generate_invoice : la facture restait
+        # en base, les heures restaient verrouillees ("facturees"), et aucun
+        # PDF n'etait ecrit ni aucune erreur affichee. Avec le correctif
+        # (currency passe par _latin1_safe dans invoice.py, et le
+        # try/except elargi a Exception dans gui.py), la generation doit
+        # soit reussir proprement (devise nettoyee), soit echouer en
+        # annulant vraiment la facture et en deverrouillant les heures.
+        self.app.db.set_setting("currency", "€")
+
+        client_id = self.app.db.add_client("Client Devise")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00"
+        )
+
+        self.app._refresh_time_entries()
+        self.app.invoice_client_var.set(f"{client_id} - Client Devise")
+
+        output_path = self.tmp / "facture_devise.pdf"
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
+             patch("tkinter.messagebox.showwarning") as mock_warn, \
+             patch("tkinter.messagebox.showerror") as mock_error, \
+             patch("tkinter.messagebox.showinfo") as mock_info, \
+             patch("tkinter.messagebox.askyesno", return_value=False):
+            self.app._generate_invoice()
+
+        invoices = self.app.db.list_invoices()
+        entry = self.app.db.list_time_entries(project_id=project_id)[0]
+
+        if invoices:
+            # Chemin "succes" : la devise a ete nettoyee, un vrai PDF a ete
+            # ecrit, et l'heure est bien rattachee a la facture creee (pas
+            # d'etat intermediaire).
+            self.assertEqual(len(invoices), 1)
+            self.assertTrue(output_path.exists())
+            self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
+            self.assertIsNotNone(entry["invoice_id"])
+            mock_error.assert_not_called()
+        else:
+            # Chemin "echec propre" : aucune facture fantome, l'heure est
+            # redevenue facturable, et l'utilisateur a ete prevenu.
+            self.assertIsNone(entry["invoice_id"])
+            self.assertFalse(output_path.exists())
+            mock_error.assert_called_once()
+
+    # -- item audit Phase 1 : la fenetre par defaut doit afficher tout le ---
+    # -- contenu de l'onglet Factures sans redimensionnement manuel ---------
+
+    def test_default_window_height_fits_the_invoices_tab_content(self):
+        # Mesure reelle (winfo_reqheight) comme l'a fait l'audit : a 640px
+        # de haut, le contenu de l'onglet Factures (le plus charge, avec sa
+        # rangee de boutons "Marquer payee"/"Dupliquer"/etc.) demandait
+        # 649px et se retrouvait coupe. La fenetre par defaut doit etre assez
+        # haute pour l'afficher entierement sans intervention de
+        # l'utilisateur.
+        self.root.deiconify()
+        self.root.update_idletasks()
+
+        notebook = None
+        for child in self.root.winfo_children():
+            if isinstance(child, __import__("tkinter").ttk.Notebook):
+                notebook = child
+                break
+        self.assertIsNotNone(notebook, "Notebook principal introuvable")
+        notebook.select(self.app.invoices_tab)
+        self.root.update_idletasks()
+
+        required_height = self.root.winfo_reqheight()
+        default_geometry = self.root.geometry()
+        default_height = int(default_geometry.split("x")[1].split("+")[0])
+
+        self.assertGreaterEqual(
+            default_height, required_height,
+            f"La fenetre par defaut ({default_height}px) est plus basse que le "
+            f"contenu requis par l'onglet Factures ({required_height}px).",
+        )
+        min_width, min_height = self.root.wm_minsize()
+        self.assertGreaterEqual(min_height, required_height)
+
 
 if __name__ == "__main__":
     unittest.main()

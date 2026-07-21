@@ -123,6 +123,7 @@ def generate_invoice_pdf(
     invoice_number = _latin1_safe(invoice_number)
     issue_date = _latin1_safe(issue_date)
     due_date = _latin1_safe(due_date) if due_date else due_date
+    currency = _latin1_safe(currency)
     line_items = [
         LineItem(_latin1_safe(li.project_name), li.hours, li.rate) for li in line_items
     ]

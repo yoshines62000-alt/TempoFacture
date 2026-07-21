@@ -38,7 +38,12 @@ class TempoFactureApp:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("980x640")
+        # 640px de hauteur coupait le bas de l'onglet Factures (le plus
+        # charge : ligne de boutons "Marquer payee"/"Dupliquer"/etc.) qui a
+        # besoin de 649px pour s'afficher entierement (mesure via
+        # winfo_reqheight() - bug trouve a l'audit). 760px laisse une marge
+        # confortable au-dessus de ce minimum sur un ecran 1920x1080.
+        self.root.geometry("980x760")
 
         self.db = Database(_data_dir() / "tempofacture.sqlite")
         self.timer = Timer(self.db)
@@ -91,6 +96,13 @@ class TempoFactureApp:
         self._refresh_timer_project_choices()
         self._refresh_invoices()
         self._restore_running_timer()
+
+        # Empeche l'utilisateur de redimensionner la fenetre en dessous de la
+        # taille requise par l'onglet Factures (le plus charge), pour ne
+        # jamais recouper sa rangee de boutons d'action (bug trouve a
+        # l'audit, voir le commentaire sur geometry() ci-dessus).
+        self.root.update_idletasks()
+        self.root.minsize(max(700, self.root.winfo_reqwidth()), max(700, self.root.winfo_reqheight()))
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick_timer()
@@ -883,11 +895,18 @@ class TempoFactureApp:
                 notes=invoice["notes"],
                 currency=invoice["currency"],
             )
-        except OSError as exc:
-            # Le PDF n'a pas pu etre ecrit (permission refusee, fichier
-            # ouvert ailleurs, disque plein...) : on annule la facture pour
-            # ne jamais laisser une facture "fantome" sans PDF correspondant,
-            # avec des heures verrouillees pour rien.
+        except Exception as exc:
+            # Le PDF n'a pas pu etre genere ou ecrit (permission refusee,
+            # fichier ouvert ailleurs, disque plein, mais aussi n'importe
+            # quelle erreur de generation - ex : caractere non gerable par
+            # fpdf2) : on annule la facture pour ne jamais laisser une
+            # facture "fantome" sans PDF correspondant, avec des heures
+            # verrouillees pour rien. On capture toute exception plausible,
+            # pas seulement OSError, car generate_invoice_pdf peut aussi
+            # lever d'autres types d'erreurs (encodage, etc.) - bug trouve a
+            # l'audit : une devise contenant un caractere hors Latin-1 (ex :
+            # "€") faisait planter la generation avec une exception non
+            # OSError, laissant une facture fantome en base sans rollback.
             self.db.delete_invoice(invoice_id)
             messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
             return
@@ -1010,7 +1029,10 @@ class TempoFactureApp:
                 notes=new_invoice["notes"],
                 currency=new_invoice["currency"],
             )
-        except OSError as exc:
+        except Exception as exc:
+            # Meme garde-fou que dans _generate_invoice : toute exception de
+            # generation (pas seulement OSError) doit annuler la facture
+            # pour ne jamais laisser de facture fantome.
             self.db.delete_invoice(new_invoice_id)
             messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
             return

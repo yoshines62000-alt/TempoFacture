@@ -188,6 +188,35 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
         self.assertTrue(output_path.exists())
         self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
 
+    def test_generates_pdf_with_non_latin1_currency_without_crashing(self):
+        # Regression : le champ "Devise" des Parametres n'est valide que
+        # "non vide" cote GUI, donc un utilisateur peut y saisir "€" au lieu
+        # de "EUR". Avant correctif, currency n'etait jamais passe par
+        # _latin1_safe() (contrairement aux autres champs texte) alors qu'il
+        # est injecte tel quel dans format_amount() puis pdf.cell() pour 5
+        # lignes du tableau : cela levait une exception d'encodage (pas un
+        # OSError) qui echappait au garde-fou de gui.py et laissait une
+        # facture fantome en base. La generation doit degrader (caractere
+        # remplace), jamais planter.
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_devise.pdf"
+        items = [inv.LineItem("Projet A", hours=2.0, rate=50.0)]
+        inv.generate_invoice_pdf(
+            output_path=output_path,
+            invoice_number="2026-0004",
+            issue_date="2026-01-15",
+            due_date=None,
+            company_name="Ma societe",
+            company_info="",
+            client_name="Client",
+            client_address="",
+            line_items=items,
+            tax_rate=0.0,
+            currency="€",
+        )
+        self.assertTrue(output_path.exists())
+        self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
+
 
 class ReexportInvoicePdfTestCase(unittest.TestCase):
     def setUp(self):
