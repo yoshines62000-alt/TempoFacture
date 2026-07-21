@@ -174,6 +174,20 @@ def generate_invoice_pdf(
         pdf.cell(width, 7, header, border=1, fill=True)
     pdf.ln()
 
+    def _truncate_to_width(text: str, width: float) -> str:
+        # Meme logique que pour la colonne Description : si le texte
+        # formate (montant + devise longue, ex. "DOLLARS AMERICAINS")
+        # deborde de la largeur de sa colonne, on le tronque avec une
+        # ellipse plutot que de laisser fpdf2 le faire deborder sur la
+        # colonne voisine (cell() ne retourne pas a la ligne et n'empeche
+        # pas le depassement visuel).
+        truncated = text
+        while truncated and pdf.get_string_width(truncated + "...") > width - 2:
+            truncated = truncated[:-1]
+        if truncated != text:
+            truncated += "..."
+        return truncated
+
     pdf.set_font("Helvetica", "", 9)
     for item in line_items:
         # Un nom de projet trop long deborderait sur les colonnes suivantes
@@ -185,22 +199,25 @@ def generate_invoice_pdf(
             label = label[:-1]
         if label != item.project_name:
             label += "..."
+        hours_text = _truncate_to_width(f"{item.hours:.2f} h", col_widths[1])
+        rate_text = _truncate_to_width(format_amount(item.rate, currency) + "/h", col_widths[2])
+        amount_text = _truncate_to_width(format_amount(item.amount, currency), col_widths[3])
         pdf.cell(col_widths[0], 7, label, border=1)
-        pdf.cell(col_widths[1], 7, f"{item.hours:.2f} h", border=1, align="R")
-        pdf.cell(col_widths[2], 7, format_amount(item.rate, currency) + "/h", border=1, align="R")
-        pdf.cell(col_widths[3], 7, format_amount(item.amount, currency), border=1, align="R")
+        pdf.cell(col_widths[1], 7, hours_text, border=1, align="R")
+        pdf.cell(col_widths[2], 7, rate_text, border=1, align="R")
+        pdf.cell(col_widths[3], 7, amount_text, border=1, align="R")
         pdf.ln()
 
     pdf.ln(4)
     label_width = sum(col_widths[:3])
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(label_width, 6, "Sous-total", align="R")
-    pdf.cell(col_widths[3], 6, format_amount(subtotal, currency), align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(col_widths[3], 6, _truncate_to_width(format_amount(subtotal, currency), col_widths[3]), align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(label_width, 6, f"TVA ({tax_rate:g} %)", align="R")
-    pdf.cell(col_widths[3], 6, format_amount(tax_amount, currency), align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(col_widths[3], 6, _truncate_to_width(format_amount(tax_amount, currency), col_widths[3]), align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(label_width, 8, "Total", align="R")
-    pdf.cell(col_widths[3], 8, format_amount(total, currency), align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(col_widths[3], 8, _truncate_to_width(format_amount(total, currency), col_widths[3]), align="R", new_x="LMARGIN", new_y="NEXT")
 
     if notes:
         pdf.ln(8)

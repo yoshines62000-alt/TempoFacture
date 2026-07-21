@@ -217,6 +217,73 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
         self.assertTrue(output_path.exists())
         self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
 
+    def test_generates_pdf_with_long_currency_without_overflowing_columns(self):
+        # Regression (audit Phase 2) : une devise longue (ex. "DOLLARS
+        # AMERICAINS") gonfle le texte formate des colonnes Heures/Taux/
+        # Montant au point de deborder de leur cellule et de chevaucher la
+        # colonne voisine, puisque ces 3 colonnes (contrairement a
+        # Description) n'etaient jamais tronquees avec ellipse avant
+        # correctif. On intercepte les appels reels a FPDF.cell() pour
+        # verifier que le texte effectivement dessine dans chaque cellule
+        # tient desormais dans la largeur de sa colonne (avant correctif, ce
+        # test echoue : le texte brut deborde).
+        from fpdf import FPDF
+        from unittest import mock
+
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_devise_longue.pdf"
+        items = [inv.LineItem("Projet A", hours=12345.67, rate=99999999.99)]
+
+        recorded = []
+        original_cell = FPDF.cell
+
+        def spying_cell(self, w=0, h=0, text="", *args, **kwargs):
+            recorded.append((w, text, self.get_string_width(text)))
+            return original_cell(self, w, h, text, *args, **kwargs)
+
+        with mock.patch.object(FPDF, "cell", spying_cell):
+            inv.generate_invoice_pdf(
+                output_path=output_path,
+                invoice_number="2026-0005",
+                issue_date="2026-01-15",
+                due_date=None,
+                company_name="Ma societe",
+                company_info="",
+                client_name="Client",
+                client_address="",
+                line_items=items,
+                tax_rate=0.0,
+                currency="DOLLARS AMERICAINS",
+            )
+
+        self.assertTrue(output_path.exists())
+        self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
+
+        col_widths = [90, 25, 30, 30]
+        # Localise la cellule "Description" de la ligne de prestation (seule
+        # cellule de largeur 90 dont le texte est "Projet A") et prend les 3
+        # cellules qui la suivent immediatement (Heures/Taux/Montant) :
+        # les autres cellules de largeur 30 plus loin dans le document
+        # (sous-total/TVA/total) sont hors du perimetre de ce correctif.
+        start = next(i for i, (w, text, _) in enumerate(recorded) if w == col_widths[0] and text == "Projet A")
+        row_cells = recorded[start:start + 4]
+        self.assertEqual(len(row_cells), 4)
+        for width, text, drawn_width in row_cells:
+            self.assertLessEqual(
+                drawn_width, width,
+                f"le texte '{text}' (largeur {drawn_width}mm) deborde de sa colonne ({width}mm)",
+            )
+
+        # Verifie aussi qu'une ellipse a bien ete appliquee sur les colonnes
+        # Taux/Montant, ou la devise longue rend le texte trop large pour la
+        # colonne (la colonne Heures n'est pas affectee par la devise et
+        # n'a donc pas besoin d'etre tronquee dans ce scenario - sinon le
+        # test ne verrouillerait rien de nouveau par rapport a la colonne
+        # Description deja tronquee).
+        rate_cell, amount_cell = row_cells[2], row_cells[3]
+        self.assertTrue(rate_cell[1].endswith("..."))
+        self.assertTrue(amount_cell[1].endswith("..."))
+
 
 class ReexportInvoicePdfTestCase(unittest.TestCase):
     def setUp(self):

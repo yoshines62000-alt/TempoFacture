@@ -79,5 +79,69 @@ class CsvExportTestCase(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+class CsvSafeTestCase(unittest.TestCase):
+    def test_prefixes_formula_characters_with_apostrophe(self):
+        for dangerous in ["=SUM(A1:A9)", "+1+1", "-1+1", "@SUM(1)"]:
+            self.assertEqual(csv_export._csv_safe(dangerous), "'" + dangerous)
+
+    def test_leaves_ordinary_text_untouched(self):
+        self.assertEqual(csv_export._csv_safe("Client Normal"), "Client Normal")
+        self.assertEqual(csv_export._csv_safe(""), "")
+
+    def test_leaves_non_string_values_untouched(self):
+        self.assertEqual(csv_export._csv_safe(42), 42)
+        self.assertIsNone(csv_export._csv_safe(None))
+
+
+class CsvExportFormulaInjectionTestCase(unittest.TestCase):
+    """Verrouille le correctif CWE-1236 : une colonne texte libre exportee en
+    CSV commencant par =, +, - ou @ (nom de projet/description/client
+    importe depuis une source non fiable) ne doit jamais etre interpretable
+    comme une formule par Excel/LibreOffice a l'ouverture du fichier."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = Database(self.tmp / "test.sqlite")
+        self.addCleanup(self.db.close)
+
+    def _read_csv(self, path):
+        with open(path, encoding="utf-8-sig") as f:
+            return list(csv.reader(f))
+
+    def test_time_entries_csv_escapes_malicious_project_and_description(self):
+        client_id = self.db.add_client("Client Test", hourly_rate=50.0)
+        project_id = self.db.add_project(client_id, "=cmd|'/c calc'!A1")
+        self.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00",
+            "+HYPERLINK(\"http://evil\")",
+        )
+        entries = self.db.list_time_entries()
+        output = self.tmp / "entries.csv"
+        csv_export.export_time_entries_csv(entries, output)
+
+        rows = self._read_csv(output)
+        self.assertTrue(rows[1][1].startswith("'="))
+        self.assertTrue(rows[1][5].startswith("'+"))
+
+    def test_invoices_csv_escapes_malicious_client_name_and_currency(self):
+        client_id = self.db.add_client("=cmd|'/c calc'!A1", hourly_rate=50.0)
+        project_id = self.db.add_project(client_id, "Projet Test")
+        entry_id = self.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00"
+        )
+        entries = self.db.list_time_entries(uninvoiced_only=True)
+        line_items = build_line_items(entries, self.db)
+        self.db.create_invoice(
+            client_id, [entry_id], tax_rate=0.0, line_items=line_items, currency="-1+2"
+        )
+        invoices = self.db.list_invoices()
+        output = self.tmp / "invoices.csv"
+        csv_export.export_invoices_csv(invoices, self.db, output)
+
+        rows = self._read_csv(output)
+        self.assertTrue(rows[1][1].startswith("'="))
+        self.assertTrue(rows[1][6].startswith("'-"))
+
+
 if __name__ == "__main__":
     unittest.main()
