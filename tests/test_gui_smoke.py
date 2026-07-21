@@ -44,6 +44,16 @@ class GuiSmokeTestCase(unittest.TestCase):
     def _select_client_row(self, client_id: int):
         self.app.clients_tree.selection_set(str(client_id))
 
+    def _set_invoice_search(self, text: str):
+        """Definit la recherche Factures et force le rafraichissement
+        (normalement debounce via root.after) a s'executer immediatement,
+        pour garder les tests deterministes sans vrai sleep."""
+        self.app.invoice_search_var.set(text)
+        if self.app._invoice_search_after_id is not None:
+            self.app.root.after_cancel(self.app._invoice_search_after_id)
+            self.app._invoice_search_after_id = None
+        self.app._refresh_invoices()
+
     # -- item 1 : avertissement avant d'archiver un client avec des heures --
     # -- non facturees --------------------------------------------------------
 
@@ -178,14 +188,18 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_invoices()
         self.assertEqual(len(self.app.invoices_tree.get_children()), 1)
 
+        # La recherche est debouncee (voir INVOICE_SEARCH_DEBOUNCE_MS) : taper
+        # ne rafraichit plus la liste de facon synchrone. On annule le
+        # rafraichissement en attente et on le declenche nous-memes pour
+        # garder ce test deterministe et rapide (pas de vrai sleep).
         number = self.app.db.get_invoice(invoice_id)["invoice_number"]
-        self.app.invoice_search_var.set(number)
+        self._set_invoice_search(number)
         self.assertEqual(len(self.app.invoices_tree.get_children()), 1)
 
-        self.app.invoice_search_var.set("client facture")
+        self._set_invoice_search("client facture")
         self.assertEqual(len(self.app.invoices_tree.get_children()), 1)
 
-        self.app.invoice_search_var.set("introuvable")
+        self._set_invoice_search("introuvable")
         self.assertEqual(len(self.app.invoices_tree.get_children()), 0)
 
     # -- item audit Phase 1 : pas de facture fantome avec une devise --------

@@ -5,13 +5,14 @@ d'une facture."""
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import Database
-from invoice import LineItem
+from invoice import LineItem, compute_totals
 
 
 class DatabaseTestCase(unittest.TestCase):
@@ -242,6 +243,38 @@ class DatabaseTestCase(unittest.TestCase):
         stored = self.db.get_invoice_line_items(invoice_id)
         self.assertEqual(len(stored), 1)
         self.assertEqual(stored[0]["rate"], 50.0)  # jamais 90.0 : fige a la creation
+
+    def test_get_all_invoice_line_items_matches_per_invoice_lookups(self):
+        # get_all_invoice_line_items() (une seule requete, invoice_id inclus)
+        # doit renvoyer, une fois regroupe par invoice_id, exactement les
+        # memes lignes que get_invoice_line_items() appelee facture par
+        # facture (l'ancienne methode, cause du pattern N+1 dans
+        # gui._refresh_invoices) - voir aussi InvoiceRefreshPerformanceTestCase
+        # plus bas pour la mesure de performance sur un gros volume.
+        client_id = self.db.add_client("Client", hourly_rate=50.0)
+        project_id = self.db.add_project(client_id, "Projet")
+        invoice_ids = []
+        for i in range(3):
+            entry_id = self.db.add_manual_time_entry(
+                project_id, f"2026-01-0{i + 1}T09:00:00+00:00", f"2026-01-0{i + 1}T1{i}:00:00+00:00"
+            )
+            line_items = [LineItem(project_name="Projet", hours=float(i + 1), rate=50.0 + i)]
+            invoice_ids.append(self.db.create_invoice(client_id, [entry_id], line_items=line_items))
+        # Une facture recurrente sans aucune ligne : doit apparaitre comme
+        # liste vide, pas comme cle absente.
+        empty_invoice_id = self.db.create_invoice(client_id, [], line_items=[])
+        invoice_ids.append(empty_invoice_id)
+
+        grouped: dict = {}
+        for row in self.db.get_all_invoice_line_items():
+            grouped.setdefault(row["invoice_id"], []).append((row["project_name"], row["hours"], row["rate"]))
+
+        for invoice_id in invoice_ids:
+            expected = [
+                (row["project_name"], row["hours"], row["rate"])
+                for row in self.db.get_invoice_line_items(invoice_id)
+            ]
+            self.assertEqual(grouped.get(invoice_id, []), expected)
 
     def test_create_invoice_with_no_time_entries_supports_recurring_invoices(self):
         # Une facture "dupliquee" (facturation recurrente) ne consomme aucune
@@ -533,6 +566,97 @@ class DatabaseTestCase(unittest.TestCase):
         os.link(self.db.path, hardlink)
         with self.assertRaises(ValueError):
             self.db.backup_to(hardlink)
+
+
+class InvoiceRefreshPerformanceTestCase(unittest.TestCase):
+    """Verrouille la correction du pattern N+1 mesure a l'audit Phase 3 dans
+    gui._refresh_invoices() : cette fonction appelait get_invoice_line_items()
+    UNE FOIS PAR FACTURE affichee (~750ms avec 3000 factures, mesure a
+    l'audit), au lieu d'une seule requete groupee. On reproduit ici le meme
+    volume synthetique (3000 factures) et on compare l'ancienne strategie
+    (une requete par facture) a la nouvelle (get_all_invoice_line_items(),
+    une seule requete puis regroupement Python) : meme resultat, largement
+    plus rapide."""
+
+    INVOICE_COUNT = 3000
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = Database(self.tmp / "perf.sqlite")
+        self.addCleanup(self.db.close)
+
+        client_id = self.db.add_client("Client volumineux", hourly_rate=50.0)
+        now = "2026-01-01T00:00:00+00:00"
+        # Insertion directe en masse (executemany) plutot que via
+        # create_invoice() facture par facture : seul le volume de donnees
+        # nous interesse ici, pas la logique de numerotation/snapshot deja
+        # testee ailleurs - generer 3000 factures via l'API haut niveau
+        # rendrait ce test lui-meme trop lent.
+        invoice_rows = [
+            (client_id, f"2026-{i:04d}", "2026-01-01", None, 20.0, "", "unpaid", "EUR", now)
+            for i in range(self.INVOICE_COUNT)
+        ]
+        self.db.conn.executemany(
+            """INSERT INTO invoices
+               (client_id, invoice_number, issue_date, due_date, tax_rate, notes, status, currency, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            invoice_rows,
+        )
+        self.db.conn.commit()
+        self.invoice_ids = [row["id"] for row in self.db.conn.execute("SELECT id FROM invoices").fetchall()]
+
+        line_item_rows = []
+        for idx, invoice_id in enumerate(self.invoice_ids):
+            # Deux lignes par facture, montants varies, pour un total non
+            # trivial (arrondi Decimal inclus).
+            line_item_rows.append((invoice_id, "Projet A", 1.0 + (idx % 7) * 0.25, 45.0 + (idx % 5)))
+            line_item_rows.append((invoice_id, "Projet B", 2.5, 60.0))
+        self.db.conn.executemany(
+            "INSERT INTO invoice_line_items (invoice_id, project_name, hours, rate) VALUES (?, ?, ?, ?)",
+            line_item_rows,
+        )
+        self.db.conn.commit()
+
+    def _totals_via_old_n_plus_one_lookup(self) -> dict:
+        totals = {}
+        for invoice in self.db.list_invoices():
+            stored_items = self.db.get_invoice_line_items(invoice["id"])
+            line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
+            _, _, total = compute_totals(line_items, invoice["tax_rate"])
+            totals[invoice["id"]] = total
+        return totals
+
+    def _totals_via_batched_lookup(self) -> dict:
+        line_items_by_invoice: dict = {}
+        for row in self.db.get_all_invoice_line_items():
+            line_items_by_invoice.setdefault(row["invoice_id"], []).append(row)
+        totals = {}
+        for invoice in self.db.list_invoices():
+            stored_items = line_items_by_invoice.get(invoice["id"], [])
+            line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
+            _, _, total = compute_totals(line_items, invoice["tax_rate"])
+            totals[invoice["id"]] = total
+        return totals
+
+    def test_batched_lookup_gives_identical_totals_to_the_old_n_plus_one_lookup(self):
+        self.assertEqual(self._totals_via_old_n_plus_one_lookup(), self._totals_via_batched_lookup())
+
+    def test_batched_lookup_is_much_faster_than_one_query_per_invoice(self):
+        start = time.perf_counter()
+        self._totals_via_old_n_plus_one_lookup()
+        old_duration = time.perf_counter() - start
+
+        start = time.perf_counter()
+        self._totals_via_batched_lookup()
+        new_duration = time.perf_counter() - start
+
+        # Assertion de duree volontairement large (machine de CI potentiellement
+        # lente/partagee) : on verifie un gain net, pas un chiffre precis.
+        # L'audit mesurait ~750ms pour l'ancienne strategie avec ce volume ;
+        # on verifie ici au moins un facteur 5, et un plafond absolu genereux
+        # pour la nouvelle strategie.
+        self.assertLess(new_duration, old_duration / 5)
+        self.assertLess(new_duration, 0.5)
 
 
 if __name__ == "__main__":

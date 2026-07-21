@@ -22,6 +22,7 @@ UPDATE_REPO = "yoshines62000-alt/TempoFacture"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
 IDLE_CHECK_INTERVAL_MS = 15_000
+INVOICE_SEARCH_DEBOUNCE_MS = 250  # attend une pause dans la frappe avant de rafraichir la liste des factures
 
 
 def _resource_path(relative: str) -> Path:
@@ -693,7 +694,8 @@ class TempoFactureApp:
         ttk.Label(invoice_search_row, text="Rechercher :").pack(side=LEFT)
         self.invoice_search_var = StringVar()
         ttk.Entry(invoice_search_row, textvariable=self.invoice_search_var, width=30).pack(side=LEFT, padx=5)
-        self.invoice_search_var.trace_add("write", lambda *_: self._refresh_invoices())
+        self._invoice_search_after_id = None
+        self.invoice_search_var.trace_add("write", lambda *_: self._on_invoice_search_changed())
 
         columns = ("id", "number", "client", "date", "total", "status")
         self.invoices_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
@@ -774,6 +776,19 @@ class TempoFactureApp:
             return
         messagebox.showinfo(APP_TITLE, f"Export termine : {Path(path).name}")
 
+    def _on_invoice_search_changed(self):
+        # Debounce : une frappe rapide de N caracteres ne doit pas declencher
+        # N rafraichissements complets de la liste (chacun re-scanne toutes
+        # les factures) - on annule le rafraichissement encore en attente et
+        # on en reprogramme un seul, apres une courte pause dans la frappe.
+        if self._invoice_search_after_id is not None:
+            self.root.after_cancel(self._invoice_search_after_id)
+        self._invoice_search_after_id = self.root.after(INVOICE_SEARCH_DEBOUNCE_MS, self._run_debounced_invoice_refresh)
+
+    def _run_debounced_invoice_refresh(self):
+        self._invoice_search_after_id = None
+        self._refresh_invoices()
+
     def _refresh_invoices(self):
         clients, labels = self._client_choices()
         self.invoice_client_combo["values"] = labels
@@ -781,6 +796,16 @@ class TempoFactureApp:
         clients_by_id = {c["id"]: c["name"] for c in self.db.list_clients(include_archived=True)}
         overdue_ids = {row["id"] for row in self.db.list_overdue_invoices()}
         query = self.invoice_search_var.get().strip().lower() if hasattr(self, "invoice_search_var") else ""
+        # Recupere les lignes de TOUTES les factures en une seule requete
+        # (au lieu d'un get_invoice_line_items() par facture affichee, qui
+        # provoquait un pattern N+1 mesure a ~750ms de gel d'interface avec
+        # 3000 factures - cette methode est appelee apres quasiment toute
+        # action de l'app, y compris a chaque frappe dans la recherche) puis
+        # les regroupe par invoice_id cote Python. Le calcul du total en
+        # lui-meme (compute_totals sur le snapshot fige) est inchange.
+        line_items_by_invoice: dict = {}
+        for row in self.db.get_all_invoice_line_items():
+            line_items_by_invoice.setdefault(row["invoice_id"], []).append(row)
         for invoice in self.db.list_invoices():
             client_name = clients_by_id.get(invoice["client_id"], "?")
             status_label = "en retard" if invoice["id"] in overdue_ids else invoice["status"]
@@ -790,7 +815,7 @@ class TempoFactureApp:
             # Reconstruit les lignes a partir du snapshot fige a la creation
             # de la facture (pas des taux horaires actuels des projets), pour
             # qu'un total affiche ici ne change jamais apres coup.
-            stored_items = self.db.get_invoice_line_items(invoice["id"])
+            stored_items = line_items_by_invoice.get(invoice["id"], [])
             line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
             _, _, total = compute_totals(line_items, invoice["tax_rate"])
             tags = ("overdue",) if invoice["id"] in overdue_ids else ()

@@ -432,6 +432,17 @@ class Database:
             (invoice_id,),
         ).fetchall()
 
+    def get_all_invoice_line_items(self) -> list:
+        """Meme contenu que get_invoice_line_items(), mais pour toutes les
+        factures en un seul aller-retour SQLite (invoice_id inclus dans
+        chaque ligne). Sert a eviter un pattern N+1 (une requete par facture)
+        quand l'appelant doit recalculer le total de chaque facture affichee
+        - voir _refresh_invoices() dans gui.py, qui regroupe ensuite ces
+        lignes par invoice_id cote Python."""
+        return self.conn.execute(
+            "SELECT invoice_id, project_name, hours, rate FROM invoice_line_items ORDER BY invoice_id",
+        ).fetchall()
+
     def set_invoice_status(self, invoice_id: int, status: str) -> None:
         if status not in ("unpaid", "paid", "cancelled"):
             raise ValueError(f"statut de facture invalide : {status}")
