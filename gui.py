@@ -11,7 +11,7 @@ from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, StringVar, Tk, ttk, messagebox, simpledialog
 
 import update_checker
-from db import Database
+from db import Database, TVA_EXEMPTION_NOTE
 from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf, reexport_invoice_pdf
 from timer import Timer, get_idle_seconds
 from csv_export import export_time_entries_csv, export_invoices_csv
@@ -263,10 +263,14 @@ class TempoFactureApp:
             self.clients_tree.heading(col, text=label)
             self.clients_tree.column(col, width=width, anchor="w")
         self.clients_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
+        self.clients_tree.bind("<Double-1>", self._edit_client)
 
         actions = ttk.Frame(frame)
         actions.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Button(actions, text="Archiver / desarchiver", command=self._toggle_client_archived).pack(side=LEFT)
+        ttk.Label(actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(
+            side=LEFT, padx=(10, 0)
+        )
 
     def _add_client(self):
         name = self.client_name_var.get().strip()
@@ -337,6 +341,95 @@ class TempoFactureApp:
         self._refresh_timer_project_choices()
         self._refresh_invoices()
 
+    def _prompt_client_fields(self, title: str, initial_name: str, initial_email: str, initial_address: str, initial_rate):
+        """Petit dialogue (nom, email, adresse, taux horaire) - renvoie un
+        dict de chaines brutes (non validees) ou None si annule. Meme
+        pattern que _prompt_time_entry_fields, reutilise ici pour l'edition
+        d'un client existant (voir _edit_client)."""
+        from tkinter import Toplevel
+
+        dialog = Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        name_var = StringVar(value=initial_name)
+        email_var = StringVar(value=initial_email)
+        address_var = StringVar(value=initial_address)
+        rate_var = StringVar(value="" if initial_rate is None else str(initial_rate))
+        result = {}
+
+        ttk.Label(dialog, text="Nom").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
+        ttk.Entry(dialog, textvariable=name_var, width=30).grid(row=0, column=1, padx=10, pady=(10, 5))
+        ttk.Label(dialog, text="Email").grid(row=1, column=0, sticky="w", padx=10)
+        ttk.Entry(dialog, textvariable=email_var, width=30).grid(row=1, column=1, padx=10)
+        ttk.Label(dialog, text="Adresse").grid(row=2, column=0, sticky="w", padx=10)
+        ttk.Entry(dialog, textvariable=address_var, width=30).grid(row=2, column=1, padx=10)
+        ttk.Label(dialog, text="Taux horaire").grid(row=3, column=0, sticky="w", padx=10)
+        ttk.Entry(dialog, textvariable=rate_var, width=30).grid(row=3, column=1, padx=10, pady=(0, 10))
+        ttk.Label(
+            dialog, text="Le nouveau taux ne s'applique qu'aux futures factures :\nles factures deja emises gardent leur montant d'origine.",
+            foreground="#666", justify=LEFT,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+
+        def on_ok():
+            result["name"] = name_var.get().strip()
+            result["email"] = email_var.get().strip()
+            result["address"] = address_var.get().strip()
+            result["hourly_rate"] = rate_var.get().strip()
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=5, column=0, columnspan=2, pady=(0, 10))
+        ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
+        ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
+
+        dialog.wait_window()
+        return result or None
+
+    def _edit_client(self, event=None):
+        """Double-clic sur une ligne de clients_tree : ouvre un dialogue
+        pre-rempli permettant de corriger nom/email/adresse/taux horaire
+        (bug trouve a l'audit, voir E3 : la couche db supportait deja
+        pleinement cette edition via update_client(), mais aucun chemin
+        d'interface graphique ne l'exposait - le seul contournement
+        possible etait d'archiver le client et d'en recreer un nouveau,
+        scindant artificiellement son historique)."""
+        selection = self.clients_tree.selection()
+        if not selection:
+            return
+        client_id = int(selection[0])
+        client = self.db.get_client(client_id)
+        if client is None:
+            return
+        result = self._prompt_client_fields(
+            "Modifier le client", client["name"], client["email"], client["address"], client["hourly_rate"]
+        )
+        if result is None:
+            return
+        if not result["name"]:
+            messagebox.showwarning(APP_TITLE, "Le nom du client est obligatoire.")
+            return
+        try:
+            rate = float(result["hourly_rate"].replace(",", ".") or 0)
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
+            return
+        if rate < 0:
+            messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
+            return
+        self.db.update_client(
+            client_id, name=result["name"], email=result["email"], address=result["address"], hourly_rate=rate
+        )
+        # Le nom/taux d'un client apparait dans plusieurs onglets (Projets,
+        # Chronometre, Factures) : les rafraichir tous, comme pour
+        # l'archivage (voir _toggle_client_archived ci-dessus).
+        self._refresh_clients()
+        self._refresh_projects()
+        self._refresh_timer_project_choices()
+        self._refresh_invoices()
+
     # -- onglet Projets -------------------------------------------------------
 
     def _build_projects_tab(self):
@@ -373,10 +466,14 @@ class TempoFactureApp:
             self.projects_tree.heading(col, text=label)
             self.projects_tree.column(col, width=width, anchor="w")
         self.projects_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
+        self.projects_tree.bind("<Double-1>", self._edit_project)
 
         actions = ttk.Frame(frame)
         actions.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Button(actions, text="Archiver / desarchiver", command=self._toggle_project_archived).pack(side=LEFT)
+        ttk.Label(actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(
+            side=LEFT, padx=(10, 0)
+        )
 
     def _add_project(self):
         client_id = self._parse_id(self.project_client_var.get())
@@ -405,15 +502,35 @@ class TempoFactureApp:
         clients, client_labels = self._client_choices()
         self.project_client_combo["values"] = client_labels
         self.projects_tree.delete(*self.projects_tree.get_children())
-        clients_by_id = {c["id"]: c["name"] for c in self.db.list_clients(include_archived=True)}
+        # Precharge nom ET taux horaire de chaque client en une seule
+        # requete, puis calcule le taux effectif de chaque projet en Python
+        # (meme logique que Database.effective_hourly_rate) plutot que
+        # d'appeler self.db.effective_hourly_rate(project["id"]) A
+        # L'INTERIEUR de la boucle - cet appel refait un get_project() (la
+        # ligne est pourtant deja disponible ici) puis potentiellement un
+        # get_client(), soit jusqu'a 2 requetes SQL de plus par projet
+        # affiche. Exactement le meme pattern N+1 deja corrige pour les
+        # factures (voir get_all_invoice_line_items()/_refresh_invoices()),
+        # mesure a l'audit a ~96x plus lent avec 2000 projets (bug trouve a
+        # l'audit, voir C1). self._currency() est egalement sorti de la
+        # boucle (une seule requete "settings" au lieu d'une par ligne).
+        clients_by_id = {c["id"]: c for c in self.db.list_clients(include_archived=True)}
+        currency = self._currency()
         query = self.project_search_var.get().strip().lower() if hasattr(self, "project_search_var") else ""
         for project in self.db.list_projects(include_archived=True):
-            client_name = clients_by_id.get(project["client_id"], "?")
+            client = clients_by_id.get(project["client_id"])
+            client_name = client["name"] if client is not None else "?"
             if query and query not in project["name"].lower() and query not in client_name.lower():
                 continue
+            if project["hourly_rate"] is not None:
+                effective_rate = float(project["hourly_rate"])
+            elif client is not None:
+                effective_rate = float(client["hourly_rate"])
+            else:
+                effective_rate = 0.0
             self.projects_tree.insert("", END, iid=str(project["id"]), values=(
                 project["id"], client_name, project["name"],
-                format_amount(self.db.effective_hourly_rate(project["id"]), self._currency()),
+                format_amount(effective_rate, currency),
                 "Oui" if project["archived"] else "Non",
             ))
 
@@ -427,6 +544,80 @@ class TempoFactureApp:
         self.db.update_project(project_id, archived=0 if project["archived"] else 1)
         self._refresh_projects()
         self._refresh_timer_project_choices()
+
+    def _prompt_project_fields(self, title: str, initial_name: str, initial_rate):
+        """Petit dialogue (nom, taux horaire optionnel) - renvoie un dict de
+        chaines brutes (non validees) ou None si annule. initial_rate peut
+        etre None (le projet herite alors du taux de son client) ; laisser
+        le champ vide a la validation revient au meme comportement."""
+        from tkinter import Toplevel
+
+        dialog = Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        name_var = StringVar(value=initial_name)
+        rate_var = StringVar(value="" if initial_rate is None else str(initial_rate))
+        result = {}
+
+        ttk.Label(dialog, text="Nom du projet").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
+        ttk.Entry(dialog, textvariable=name_var, width=30).grid(row=0, column=1, padx=10, pady=(10, 5))
+        ttk.Label(dialog, text="Taux horaire (vide = taux du client)").grid(row=1, column=0, sticky="w", padx=10)
+        ttk.Entry(dialog, textvariable=rate_var, width=30).grid(row=1, column=1, padx=10, pady=(0, 10))
+
+        def on_ok():
+            result["name"] = name_var.get().strip()
+            result["hourly_rate"] = rate_var.get().strip()
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, columnspan=2, pady=(0, 10))
+        ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
+        ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
+
+        dialog.wait_window()
+        return result or None
+
+    def _edit_project(self, event=None):
+        """Double-clic sur une ligne de projects_tree : ouvre un dialogue
+        pre-rempli permettant de corriger le nom ou le taux horaire propre
+        du projet (bug trouve a l'audit, voir E3 - meme lacune que pour les
+        clients : update_project() supportait deja cette edition cote
+        base, mais aucun chemin GUI ne l'exposait)."""
+        selection = self.projects_tree.selection()
+        if not selection:
+            return
+        project_id = int(selection[0])
+        project = self.db.get_project(project_id)
+        if project is None:
+            return
+        result = self._prompt_project_fields("Modifier le projet", project["name"], project["hourly_rate"])
+        if result is None:
+            return
+        name = result["name"]
+        if not name:
+            messagebox.showwarning(APP_TITLE, "Le nom du projet est obligatoire.")
+            return
+        rate_text = result["hourly_rate"].replace(",", ".")
+        rate = None
+        if rate_text:
+            try:
+                rate = float(rate_text)
+            except ValueError:
+                messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
+                return
+            if rate < 0:
+                messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
+                return
+        # rate=None remet explicitement le projet en heritage du taux de
+        # son client (meme semantique qu'a la creation, voir _add_project) :
+        # utile pour annuler un taux specifique saisi par erreur.
+        self.db.update_project(project_id, name=name, hourly_rate=rate)
+        self._refresh_projects()
+        self._refresh_timer_project_choices()
+        self._refresh_invoices()
 
     # -- onglet Chronometre ---------------------------------------------------
 
@@ -745,6 +936,26 @@ class TempoFactureApp:
         ttk.Entry(top, textvariable=self.invoice_tax_var, width=6).pack(side=LEFT, padx=5)
         ttk.Button(top, text="Generer la facture (PDF)", command=self._generate_invoice).pack(side=LEFT, padx=10)
 
+        # Rappel contextuel de la mention legale de franchise en base de
+        # TVA (art. 293 B du CGI) : le champ TVA est preinitialise a "0",
+        # exactement le cas d'un auto-entrepreneur francais exonere (public
+        # cible principal de l'app, voir README) - mais rien ne suggerait
+        # auparavant cette mention obligatoire, une simple ligne "TVA (0 %)"
+        # n'etant pas la mention legale attendue (bug trouve a l'audit, voir
+        # A6). Visible uniquement quand la TVA saisie est 0, pour ne pas
+        # gener les utilisateurs assujettis.
+        tva_hint_row = ttk.Frame(frame)
+        tva_hint_row.pack(fill=X, padx=10, pady=(0, 5))
+        self.tva_hint_var = StringVar()
+        ttk.Label(
+            tva_hint_row, textvariable=self.tva_hint_var, foreground="#666",
+            wraplength=560, justify=LEFT,
+        ).pack(side=LEFT)
+        self.tva_hint_button = ttk.Button(
+            tva_hint_row, text="Ajouter la mention legale aux notes", command=self._insert_tva_exemption_note
+        )
+        self.invoice_tax_var.trace_add("write", lambda *_: self._update_tva_hint())
+
         notes_row = ttk.Frame(frame)
         notes_row.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Label(notes_row, text="Notes (imprimees sur la facture)").pack(side=LEFT)
@@ -803,6 +1014,32 @@ class TempoFactureApp:
         ttk.Button(actions, text="Reexporter le PDF...", command=self._reexport_invoice_pdf).pack(side=LEFT)
         ttk.Button(actions, text="Supprimer (libere les heures)", command=self._delete_invoice).pack(side=RIGHT)
         ttk.Button(actions, text="Exporter en CSV...", command=self._export_invoices_csv).pack(side=RIGHT, padx=(0, 6))
+
+        # self.invoice_notes_var doit deja exister (voir notes_row
+        # ci-dessus) avant ce premier appel, puisque _insert_tva_exemption_
+        # note() (declenche par le bouton) l'utilise.
+        self._update_tva_hint()
+
+    def _update_tva_hint(self):
+        try:
+            tax_rate = float(self.invoice_tax_var.get().replace(",", ".") or 0)
+        except ValueError:
+            tax_rate = None
+        if tax_rate == 0:
+            self.tva_hint_var.set(
+                "Si vous etes exonere de TVA (franchise en base), pensez a ajouter la "
+                "mention legale obligatoire dans les notes de la facture :"
+            )
+            self.tva_hint_button.pack(side=LEFT, padx=(6, 0))
+        else:
+            self.tva_hint_var.set("")
+            self.tva_hint_button.pack_forget()
+
+    def _insert_tva_exemption_note(self):
+        current = self.invoice_notes_var.get().strip()
+        if TVA_EXEMPTION_NOTE in current:
+            return  # deja presente, ne pas la dupliquer
+        self.invoice_notes_var.set(f"{current} {TVA_EXEMPTION_NOTE}".strip())
 
     def _refresh_note_templates(self):
         templates = self.db.list_note_templates()
@@ -1046,7 +1283,37 @@ class TempoFactureApp:
         if invoice_id is None:
             messagebox.showinfo(APP_TITLE, "Selectionnez une facture d'abord.")
             return
-        if not messagebox.askyesno(APP_TITLE, "Supprimer cette facture ? Les heures redeviendront facturables."):
+        invoice = self.db.get_invoice(invoice_id)
+        if invoice is None:
+            # Facture supprimee entre son affichage dans la liste et ce clic
+            # (meme garde-fou que _reexport_invoice_pdf/_duplicate_invoice).
+            messagebox.showwarning(APP_TITLE, "Cette facture n'existe plus.")
+            return
+        # Contrairement a "Marquer annulee" (qui conserve la facture et son
+        # numero dans l'historique), supprimer efface definitivement la
+        # ligne "invoices" ET son invoice_number - un numero deja attribue
+        # ne doit normalement jamais disparaitre d'une sequence de
+        # facturation officielle (numerotation chronologique continue,
+        # obligation legale dans plusieurs juridictions dont la France). Le
+        # message d'origine ne mentionnait que la liberation des heures,
+        # jamais cette consequence sur la numerotation - un utilisateur qui
+        # "nettoie" par reflexe une facture deja emise/communiquee creerait
+        # ainsi un trou de sequence sans le savoir (bug trouve a l'audit,
+        # voir A5). "Marquer annulee" produit le meme resultat pratique
+        # (heures a nouveau facturables) sans jamais creer ce trou.
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Supprimer definitivement la facture {invoice['invoice_number']} ?\n\n"
+            "Les heures associees redeviendront facturables, mais le numero "
+            f"{invoice['invoice_number']} disparaitra definitivement de votre "
+            "historique de facturation.\n\n"
+            "Si cette facture a deja ete communiquee a un client, cela peut poser "
+            "probleme en cas de controle fiscal (numerotation chronologique "
+            "continue exigee) : preferez 'Marquer annulee' dans ce cas, qui libere "
+            "aussi les heures mais conserve la facture et son numero dans "
+            "l'historique.\n\n"
+            "Supprimer quand meme ?",
+        ):
             return
         self.db.delete_invoice(invoice_id)
         self._refresh_invoices()

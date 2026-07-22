@@ -19,6 +19,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Mention legale attendue sur les factures d'un auto-entrepreneur/freelance
+# francais exonere de TVA (franchise en base, art. 293 B du Code general
+# des impots) - une simple ligne "TVA (0 %) : 0,00 EUR" n'est PAS cette
+# mention (voir invoice.py) : elle induit le client en erreur (zero-rating
+# vs exoneration). Utilisee a la fois pour le modele de note preconfigure
+# (voir _seed_default_note_templates ci-dessous) et pour le bouton
+# contextuel de gui.py (bug trouve a l'audit, voir A6).
+TVA_EXEMPTION_NOTE = "TVA non applicable, art. 293 B du CGI"
+TVA_EXEMPTION_TEMPLATE_NAME = "Franchise en base de TVA"
+
+
 class Database:
     """Enveloppe fine autour de sqlite3 : une connexion, un schema, des
     methodes CRUD explicites. Pas d'ORM : le schema est simple et les
@@ -136,6 +147,27 @@ class Database:
         # mauvaise devise affichee) - chaque facture doit au contraire
         # figer la devise en vigueur au moment de sa creation.
         self._add_column_if_missing("invoices", "currency", "TEXT NOT NULL DEFAULT 'EUR'")
+        self._seed_default_note_templates()
+
+    def _seed_default_note_templates(self) -> None:
+        """Fournit, des la premiere ouverture d'une base (installation ou
+        mise a jour depuis une version anterieure qui n'a jamais ecrit
+        cette cle), un modele de note pret a l'emploi pour la mention
+        legale de franchise en base de TVA - la grande majorite du public
+        cible (freelances francais, voir README) beneficie de ce regime et
+        doit legalement faire figurer cette mention sur chaque facture,
+        mais rien ne la suggerait auparavant (bug trouve a l'audit, voir
+        A6). N'ecrase jamais un choix explicite de l'utilisateur : ne se
+        declenche que si la cle "note_templates" n'existe pas du tout en
+        base (jamais si elle existe deja, meme vide - ex. l'utilisateur a
+        supprime ce modele lui-meme)."""
+        row = self.conn.execute("SELECT 1 FROM settings WHERE key = 'note_templates'").fetchone()
+        if row is not None:
+            return
+        self.set_setting(
+            "note_templates",
+            json.dumps([{"name": TVA_EXEMPTION_TEMPLATE_NAME, "text": TVA_EXEMPTION_NOTE}]),
+        )
 
     def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
         existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}

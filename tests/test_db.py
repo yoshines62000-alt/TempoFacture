@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from db import Database
+from db import Database, TVA_EXEMPTION_TEMPLATE_NAME
 from invoice import LineItem, compute_totals
 
 
@@ -412,13 +412,17 @@ class DatabaseTestCase(unittest.TestCase):
 
     def test_save_and_list_note_templates(self):
         self.db.save_note_template("Merci", "Merci pour votre confiance.")
-        templates = self.db.list_note_templates()
+        # Le modele "Franchise en base de TVA" est deja present sur toute
+        # base fraichement creee (voir A6 / test_new_database_seeds_the_tva_
+        # exemption_note_template ci-dessous) : on l'exclut ici pour garder
+        # ce test concentre sur le comportement save/list generique.
+        templates = [t for t in self.db.list_note_templates() if t["name"] != TVA_EXEMPTION_TEMPLATE_NAME]
         self.assertEqual(templates, [{"name": "Merci", "text": "Merci pour votre confiance."}])
 
     def test_save_note_template_with_existing_name_overwrites_it(self):
         self.db.save_note_template("Merci", "Ancien texte")
         self.db.save_note_template("Merci", "Nouveau texte")
-        templates = self.db.list_note_templates()
+        templates = [t for t in self.db.list_note_templates() if t["name"] == "Merci"]
         self.assertEqual(len(templates), 1)
         self.assertEqual(templates[0]["text"], "Nouveau texte")
 
@@ -431,15 +435,42 @@ class DatabaseTestCase(unittest.TestCase):
         self.db.save_note_template("B", "texte B")
         self.db.delete_note_template("A")
         names = [t["name"] for t in self.db.list_note_templates()]
-        self.assertEqual(names, ["B"])
+        self.assertIn("B", names)
+        self.assertNotIn("A", names)
 
     def test_delete_unknown_note_template_is_a_no_op(self):
+        before = len(self.db.list_note_templates())
         self.db.save_note_template("A", "texte A")
         self.db.delete_note_template("Inconnu")
-        self.assertEqual(len(self.db.list_note_templates()), 1)
+        self.assertEqual(len(self.db.list_note_templates()), before + 1)
 
-    def test_list_note_templates_returns_empty_list_when_never_set(self):
-        self.assertEqual(self.db.list_note_templates(), [])
+    # -- item audit Phase 4, A6 : mention legale de franchise en base de --
+    # -- TVA absente (modele de note preconfigure des la premiere --------
+    # -- installation) ------------------------------------------------------
+
+    def test_new_database_seeds_the_tva_exemption_note_template(self):
+        # Correctif A6 : un auto-entrepreneur francais exonere de TVA
+        # (franchise en base) doit legalement faire figurer une mention
+        # specifique sur ses factures (art. 293 B du CGI) - rien ne le lui
+        # suggerait avant ce correctif (bug trouve a l'audit). Une base
+        # fraichement creee (self.db, voir setUp) est desormais
+        # preinitialisee avec un modele de note pret a l'emploi pour cela.
+        templates = self.db.list_note_templates()
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0]["name"], TVA_EXEMPTION_TEMPLATE_NAME)
+        self.assertIn("293 B", templates[0]["text"])
+
+    def test_deleting_the_seeded_template_is_not_reseeded_on_reopen(self):
+        # Le modele par defaut n'est fourni qu'"a la premiere installation"
+        # (cle jamais ecrite en base) : un utilisateur qui le supprime
+        # explicitement ne doit jamais le voir reapparaitre a la prochaine
+        # ouverture de la meme base - sans quoi il serait impossible de
+        # vraiment s'en debarrasser.
+        self.db.delete_note_template(TVA_EXEMPTION_TEMPLATE_NAME)
+        self.db.close()
+        reopened = Database(self.tmp / "test.sqlite")
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.list_note_templates(), [])
 
     def test_settings_roundtrip(self):
         self.db.set_setting("company_name", "Ma Societe")
@@ -655,6 +686,81 @@ class InvoiceRefreshPerformanceTestCase(unittest.TestCase):
         # L'audit mesurait ~750ms pour l'ancienne strategie avec ce volume ;
         # on verifie ici au moins un facteur 5, et un plafond absolu genereux
         # pour la nouvelle strategie.
+        self.assertLess(new_duration, old_duration / 5)
+        self.assertLess(new_duration, 0.5)
+
+
+class ProjectRefreshPerformanceTestCase(unittest.TestCase):
+    """Verrouille la correction du pattern N+1 mesure a l'audit Phase 4 dans
+    gui._refresh_projects() : cette fonction appelait
+    effective_hourly_rate(project_id) UNE FOIS PAR PROJET affiche (chaque
+    appel refait un get_project(), puis potentiellement un get_client() -
+    jusqu'a 2 requetes SQL de plus par ligne, mesure a ~96x plus lent avec
+    2000 projets a l'audit), au lieu de precharger une seule fois les
+    clients (nom + taux horaire) et de calculer le taux effectif en Python.
+    Exactement le meme pattern - et la meme methodologie de test - que
+    InvoiceRefreshPerformanceTestCase ci-dessus, deja corrige pour les
+    factures."""
+
+    PROJECT_COUNT = 2000
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = Database(self.tmp / "perf_projects.sqlite")
+        self.addCleanup(self.db.close)
+
+        self.client_ids = [self.db.add_client(f"Client {i}", hourly_rate=40.0 + i) for i in range(20)]
+        now = "2026-01-01T00:00:00+00:00"
+        project_rows = []
+        for i in range(self.PROJECT_COUNT):
+            client_id = self.client_ids[i % len(self.client_ids)]
+            # Un projet sur deux definit son propre taux (l'autre herite de
+            # celui de son client) : les deux branches de
+            # effective_hourly_rate doivent etre exercees par ce test.
+            project_hourly_rate = 55.0 + (i % 13) if i % 2 == 0 else None
+            project_rows.append((client_id, f"Projet {i}", project_hourly_rate, 0, now))
+        self.db.conn.executemany(
+            "INSERT INTO projects (client_id, name, hourly_rate, archived, created_at) VALUES (?, ?, ?, ?, ?)",
+            project_rows,
+        )
+        self.db.conn.commit()
+
+    def _rates_via_old_n_plus_one_lookup(self) -> dict:
+        rates = {}
+        for project in self.db.list_projects(include_archived=True):
+            rates[project["id"]] = self.db.effective_hourly_rate(project["id"])
+        return rates
+
+    def _rates_via_batched_lookup(self) -> dict:
+        clients_by_id = {c["id"]: c for c in self.db.list_clients(include_archived=True)}
+        rates = {}
+        for project in self.db.list_projects(include_archived=True):
+            client = clients_by_id.get(project["client_id"])
+            if project["hourly_rate"] is not None:
+                rates[project["id"]] = float(project["hourly_rate"])
+            elif client is not None:
+                rates[project["id"]] = float(client["hourly_rate"])
+            else:
+                rates[project["id"]] = 0.0
+        return rates
+
+    def test_batched_lookup_gives_identical_rates_to_the_old_n_plus_one_lookup(self):
+        self.assertEqual(self._rates_via_old_n_plus_one_lookup(), self._rates_via_batched_lookup())
+
+    def test_batched_lookup_is_much_faster_than_one_query_per_project(self):
+        start = time.perf_counter()
+        self._rates_via_old_n_plus_one_lookup()
+        old_duration = time.perf_counter() - start
+
+        start = time.perf_counter()
+        self._rates_via_batched_lookup()
+        new_duration = time.perf_counter() - start
+
+        # Assertion de duree volontairement large (machine de CI potentiellement
+        # lente/partagee) : on verifie un gain net, pas un chiffre precis.
+        # L'audit mesurait un facteur ~96x avec 2000 projets ; on verifie
+        # ici au moins un facteur 5, et un plafond absolu genereux pour la
+        # nouvelle strategie.
         self.assertLess(new_duration, old_duration / 5)
         self.assertLess(new_duration, 0.5)
 

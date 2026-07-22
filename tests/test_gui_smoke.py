@@ -178,6 +178,21 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app.project_search_var.set("introuvable")
         self.assertEqual(len(self.app.projects_tree.get_children()), 0)
 
+    # -- item audit Phase 4, C1 : le taux effectif pre-calcule en Python ---
+    # -- reste correct pour un projet avec taux propre ET un projet qui ----
+    # -- herite du taux de son client ---------------------------------------
+
+    def test_refresh_projects_shows_effective_rate_for_project_and_client_level_rates(self):
+        client_id = self.app.db.add_client("Client Taux", hourly_rate=40.0)
+        project_with_own_rate = self.app.db.add_project(client_id, "Projet Taux Propre", hourly_rate=90.0)
+        project_inheriting = self.app.db.add_project(client_id, "Projet Herite")
+        self.app._refresh_projects()
+
+        values_own = self.app.projects_tree.item(str(project_with_own_rate), "values")
+        values_inherit = self.app.projects_tree.item(str(project_inheriting), "values")
+        self.assertEqual(values_own[3], "90.00 EUR")
+        self.assertEqual(values_inherit[3], "40.00 EUR")
+
     def test_invoice_search_filters_by_number_client_or_status(self):
         client_id = self.app.db.add_client("Client Facture")
         project_id = self.app.db.add_project(client_id, "Projet")
@@ -354,6 +369,204 @@ class GuiSmokeTestCase(unittest.TestCase):
         gui._configure_logging()
         gui._configure_logging()
         self.assertEqual(len(gui._logger.handlers), 1)
+
+    # -- item audit Phase 4, A5 : suppression definitive de facture vs -----
+    # -- annulation (avertissement sur le trou de numerotation) ------------
+
+    def test_delete_invoice_confirmation_warns_about_the_numbering_gap(self):
+        # Regression (audit Phase 4, A5) : le message de confirmation
+        # d'origine ne mentionnait que la liberation des heures, jamais la
+        # consequence sur la numerotation legale (numero definitivement
+        # perdu) ni l'alternative "Marquer annulee" qui evite ce trou. Ce
+        # test verrouille que le numero de facture et l'alternative
+        # "annulee" apparaissent bien dans le message presente a
+        # l'utilisateur avant toute suppression definitive.
+        client_id = self.app.db.add_client("Client Suppression")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        invoice_id = self.app.db.create_invoice(client_id, [entry_id])
+        invoice_number = self.app.db.get_invoice(invoice_id)["invoice_number"]
+        self.app._refresh_invoices()
+        self.app.invoices_tree.selection_set(str(invoice_id))
+
+        with patch("tkinter.messagebox.askyesno", return_value=False) as askyesno:
+            self.app._delete_invoice()
+
+        askyesno.assert_called_once()
+        message = askyesno.call_args[0][1]
+        self.assertIn(invoice_number, message)
+        self.assertIn("annulee", message.lower())
+        self.assertIn("numero", message.lower())
+        # La confirmation a ete refusee : la facture doit toujours exister,
+        # avec son numero intact (aucun trou cree).
+        self.assertIsNotNone(self.app.db.get_invoice(invoice_id))
+
+    def test_confirming_invoice_deletion_still_deletes_it(self):
+        # La confirmation enrichie (message plus long) ne doit rien casser
+        # du comportement existant quand l'utilisateur confirme reellement.
+        client_id = self.app.db.add_client("Client Suppression")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        invoice_id = self.app.db.create_invoice(client_id, [entry_id])
+        self.app._refresh_invoices()
+        self.app.invoices_tree.selection_set(str(invoice_id))
+
+        with patch("tkinter.messagebox.askyesno", return_value=True):
+            self.app._delete_invoice()
+
+        self.assertIsNone(self.app.db.get_invoice(invoice_id))
+        self.assertIsNone(self.app.db.get_time_entry(entry_id)["invoice_id"])  # heure redevenue facturable
+
+    # -- item audit Phase 4, A6 : rappel contextuel de la mention legale --
+    # -- de franchise en base de TVA quand le taux saisi est 0 -------------
+
+    def test_tva_hint_is_shown_by_default_since_the_tax_field_defaults_to_zero(self):
+        # self.invoice_tax_var vaut "0" des la construction de l'onglet
+        # (cas d'usage typique d'un auto-entrepreneur exonere, voir
+        # README/public cible) : le rappel doit donc etre visible sans
+        # aucune action de l'utilisateur. winfo_manager() (plutot que
+        # winfo_ismapped(), toujours faux ici puisque self.root est
+        # withdraw() dans setUp) reflete fidelement l'appel a pack()/
+        # pack_forget() independamment de l'affichage reel a l'ecran.
+        self.assertNotEqual(self.app.tva_hint_var.get(), "")
+        self.assertEqual(self.app.tva_hint_button.winfo_manager(), "pack")
+
+    def test_tva_hint_disappears_when_a_nonzero_tax_rate_is_entered(self):
+        self.app.invoice_tax_var.set("20")
+        self.assertEqual(self.app.tva_hint_var.get(), "")
+        self.assertEqual(self.app.tva_hint_button.winfo_manager(), "")
+
+        self.app.invoice_tax_var.set("0")
+        self.assertNotEqual(self.app.tva_hint_var.get(), "")
+        self.assertEqual(self.app.tva_hint_button.winfo_manager(), "pack")
+
+    def test_insert_tva_exemption_note_appends_the_legal_mention(self):
+        self.app.invoice_notes_var.set("Merci de votre confiance.")
+        self.app._insert_tva_exemption_note()
+        self.assertEqual(
+            self.app.invoice_notes_var.get(),
+            "Merci de votre confiance. TVA non applicable, art. 293 B du CGI",
+        )
+
+    def test_insert_tva_exemption_note_does_not_duplicate_if_already_present(self):
+        self.app.invoice_notes_var.set("Deja present : TVA non applicable, art. 293 B du CGI")
+        self.app._insert_tva_exemption_note()
+        self.assertEqual(
+            self.app.invoice_notes_var.get(),
+            "Deja present : TVA non applicable, art. 293 B du CGI",
+        )
+
+    # -- item audit Phase 4, E3 : edition d'un client/projet existant ------
+    # -- (double-clic sur la ligne, aucun chemin GUI n'existait avant) -----
+
+    def test_double_click_edit_client_updates_name_email_address_and_rate(self):
+        client_id = self.app.db.add_client("Ancien Nom", "old@example.com", "Ancienne adresse", 50.0)
+        self.app._refresh_clients()
+
+        with patch.object(
+            self.app, "_prompt_client_fields",
+            return_value={
+                "name": "Nouveau Nom", "email": "new@example.com",
+                "address": "Nouvelle adresse", "hourly_rate": "90",
+            },
+        ):
+            self.app.clients_tree.selection_set(str(client_id))
+            self.app._edit_client()
+
+        client = self.app.db.get_client(client_id)
+        self.assertEqual(client["name"], "Nouveau Nom")
+        self.assertEqual(client["email"], "new@example.com")
+        self.assertEqual(client["address"], "Nouvelle adresse")
+        self.assertEqual(client["hourly_rate"], 90.0)
+
+    def test_cancelling_edit_client_dialog_leaves_the_client_unchanged(self):
+        client_id = self.app.db.add_client("Nom Original", hourly_rate=50.0)
+        self.app._refresh_clients()
+
+        with patch.object(self.app, "_prompt_client_fields", return_value=None):
+            self.app.clients_tree.selection_set(str(client_id))
+            self.app._edit_client()
+
+        client = self.app.db.get_client(client_id)
+        self.assertEqual(client["name"], "Nom Original")
+        self.assertEqual(client["hourly_rate"], 50.0)
+
+    def test_clients_and_projects_trees_have_a_double_click_binding_wired(self):
+        # Tk ne permet pas de synthetiser un <Double-1> via event_generate()
+        # (le modificateur "Double" est detecte en interne a partir de deux
+        # vrais clics rapproches, pas reproductible de maniere fiable dans
+        # un test automatise) - on verifie donc que le binding est bien
+        # enregistre sur chaque widget ; le comportement de _edit_client/
+        # _edit_project est deja verrouille par les tests ci-dessus et
+        # ci-dessous via un appel direct.
+        self.assertTrue(self.app.clients_tree.bind("<Double-1>"))
+        self.assertTrue(self.app.projects_tree.bind("<Double-1>"))
+
+    def test_double_click_edit_project_updates_name_and_rate(self):
+        client_id = self.app.db.add_client("Client", hourly_rate=40.0)
+        project_id = self.app.db.add_project(client_id, "Ancien Projet")
+        self.app._refresh_projects()
+
+        with patch.object(
+            self.app, "_prompt_project_fields", return_value={"name": "Nouveau Projet", "hourly_rate": "75"}
+        ):
+            self.app.projects_tree.selection_set(str(project_id))
+            self.app._edit_project()
+
+        project = self.app.db.get_project(project_id)
+        self.assertEqual(project["name"], "Nouveau Projet")
+        self.assertEqual(project["hourly_rate"], 75.0)
+
+    def test_double_click_edit_project_can_clear_the_rate_to_inherit_from_client(self):
+        # Vider le champ taux doit remettre le projet en heritage du taux
+        # de son client (hourly_rate redevient NULL en base), pas le forcer
+        # a 0.
+        client_id = self.app.db.add_client("Client", hourly_rate=40.0)
+        project_id = self.app.db.add_project(client_id, "Projet", hourly_rate=99.0)
+        self.app._refresh_projects()
+
+        with patch.object(self.app, "_prompt_project_fields", return_value={"name": "Projet", "hourly_rate": ""}):
+            self.app.projects_tree.selection_set(str(project_id))
+            self.app._edit_project()
+
+        project = self.app.db.get_project(project_id)
+        self.assertIsNone(project["hourly_rate"])
+        self.assertEqual(self.app.db.effective_hourly_rate(project_id), 40.0)
+
+    def test_editing_client_rate_via_the_gui_does_not_retroactively_change_an_issued_invoice(self):
+        # Verrouille A3 (gel des lignes de facture a l'emission) sur le
+        # NOUVEAU chemin d'edition expose par ce correctif : avant E3, le
+        # seul moyen de changer un taux client deja en base etait d'appeler
+        # db.update_client() directement dans un test (voir
+        # test_invoice_line_items_are_frozen_after_rate_change dans
+        # test_invoice.py) - jamais via un vrai chemin GUI, puisqu'aucun
+        # n'existait (angle mort signale par l'audit, section L3).
+        client_id = self.app.db.add_client("Client Facture", hourly_rate=50.0)
+        project_id = self.app.db.add_project(client_id, "Projet")
+        self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00"
+        )
+        entries = self.app.db.list_time_entries(project_id=project_id)
+        line_items = gui.build_line_items(entries, self.app.db)
+        invoice_id = self.app.db.create_invoice(client_id, [e["id"] for e in entries], line_items=line_items)
+        stored_before = self.app.db.get_invoice_line_items(invoice_id)
+        self.assertEqual(stored_before[0]["rate"], 50.0)
+
+        self.app._refresh_clients()
+        with patch.object(
+            self.app, "_prompt_client_fields",
+            return_value={"name": "Client Facture", "email": "", "address": "", "hourly_rate": "120"},
+        ):
+            self.app.clients_tree.selection_set(str(client_id))
+            self.app._edit_client()
+
+        self.assertEqual(self.app.db.get_client(client_id)["hourly_rate"], 120.0)
+        stored_after = self.app.db.get_invoice_line_items(invoice_id)
+        self.assertEqual(stored_after[0]["rate"], 50.0)  # toujours figee, jamais 120
 
     def test_business_error_messages_never_embed_client_or_financial_data(self):
         # Le contenu journalise inclut le message de l'exception : ce test

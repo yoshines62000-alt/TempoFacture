@@ -106,16 +106,24 @@ python -m pip install -r requirements.txt
 ## Utilisation
 
 1. Onglet **Clients** : ajoutez vos clients (nom, email, adresse, taux
-   horaire par défaut).
+   horaire par défaut). Double-cliquez sur une ligne existante pour modifier
+   ses informations (par exemple une revalorisation de tarif) - les
+   factures déjà émises conservent toujours leurs montants d'origine.
 2. Onglet **Projets** : créez un projet rattaché à un client, avec un taux
    horaire propre si besoin (sinon celui du client s'applique).
+   Double-cliquez sur une ligne existante pour modifier son nom ou son taux
+   (laissez le taux vide pour revenir à celui du client).
 3. Onglet **Chronomètre** : choisissez un projet, cliquez sur **Démarrer**,
    travaillez, cliquez sur **Arrêter**. Vous pouvez aussi ajouter des heures
    manuellement.
 4. Onglet **Factures** : choisissez un client, la liste des heures non
    facturées s'affiche automatiquement avec le montant estimé. Renseignez
    la TVA, cliquez sur **Générer la facture (PDF)**, choisissez où
-   l'enregistrer.
+   l'enregistrer. Si vous êtes exonéré de TVA (franchise en base), un
+   rappel s'affiche automatiquement quand le taux est à 0 % pour ajouter la
+   mention légale obligatoire (« TVA non applicable, art. 293 B du CGI »)
+   dans les notes de la facture ; un modèle de note prêt à l'emploi portant
+   ce nom est aussi fourni dès la première installation.
 5. Onglet **Paramètres** : renseignez le nom et les informations de votre
    entreprise (affichés sur chaque facture générée), le délai de paiement
    par défaut, la devise, et le seuil d'inactivité du chronomètre.

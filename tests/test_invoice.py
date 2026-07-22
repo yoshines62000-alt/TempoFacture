@@ -63,6 +63,39 @@ class BuildLineItemsTestCase(unittest.TestCase):
         rates = sorted(li.rate for li in line_items)
         self.assertEqual(rates, [50.0, 80.0])
 
+    def test_aggregated_hours_round_half_up_on_a_known_binary_float_tie(self):
+        # Regression (audit Phase 4, A1) : build_line_items() appelait
+        # round(hours, 2) (arrondi natif Python, round-half-to-even sur la
+        # representation BINAIRE) sur la somme des heures d'un projet, au
+        # lieu du meme arrondi Decimal/ROUND_HALF_UP deja applique aux
+        # montants (voir LineItemAmountRoundingTestCase ci-dessus). Deux
+        # entrees reelles totalisant exactement 2h40m30s = 2.675h
+        # illustrent le piege : round(2.675, 2) natif donne 2.67 (car
+        # 2.675 est en realite stocke en binaire comme
+        # 2.67499999999999982...), alors que l'arrondi commercial correct
+        # est 2.68 - un ecart silencieux de 1 EUR sur cette seule ligne a
+        # 100/h, jamais visible a l'ecran (apercu, PDF, CSV restent tous
+        # coherents entre eux car tous derives de LineItem.hours deja
+        # fige).
+        client_id = self.db.add_client("Client Arrondi", hourly_rate=100.0)
+        project_id = self.db.add_project(client_id, "Projet")
+        self.db.add_manual_time_entry(project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:30:15+00:00")  # 1h30m15s
+        self.db.add_manual_time_entry(project_id, "2026-01-01T11:00:00+00:00", "2026-01-01T12:10:15+00:00")  # 1h10m15s
+        entries = self.db.list_time_entries(project_id=project_id)
+
+        # Sanity check : la somme brute des heures reproduit bien le cas
+        # limite binaire vise par ce test, avant tout arrondi.
+        raw_total = sum(
+            inv.compute_duration_hours(e["start_time"], e["end_time"]) for e in entries
+        )
+        self.assertEqual(str(raw_total), "2.675")
+        self.assertEqual(round(raw_total, 2), 2.67)  # comportement natif (faux, ce que ce test verrouille comme corrige)
+
+        line_items = inv.build_line_items(entries, self.db)
+        self.assertEqual(len(line_items), 1)
+        self.assertEqual(line_items[0].hours, 2.68)  # arrondi commercial correct, pas 2.67
+        self.assertEqual(line_items[0].amount, 268.0)  # pas 267.0
+
 
 class LineItemAmountRoundingTestCase(unittest.TestCase):
     def test_amount_rounds_half_up_on_a_known_binary_float_tie(self):
@@ -283,6 +316,78 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
         rate_cell, amount_cell = row_cells[2], row_cells[3]
         self.assertTrue(rate_cell[1].endswith("..."))
         self.assertTrue(amount_cell[1].endswith("..."))
+
+    def test_generates_pdf_with_extreme_totals_and_long_currency_without_truncating_the_amount(self):
+        # Regression (audit Phase 4, B1) : le correctif precedent (voir le
+        # test ci-dessus) ne couvrait que les 4 cellules de la ligne
+        # d'article, jamais le bloc Sous-total/TVA/Total. Avec un montant
+        # tres eleve (faute de frappe plausible sur le taux horaire, aucune
+        # borne superieure n'existe) combine a une devise longue, la
+        # colonne Montant du bloc de totaux (30mm) tronquait les CHIFFRES
+        # du total lui-meme, pas seulement le libelle de devise - rendant
+        # le montant a payer illisible sur le document remis au client
+        # (ex : "1 481 481 88..." au lieu du total complet). Ce test
+        # verrouille que chacune des 3 lignes du bloc de totaux affiche
+        # desormais son montant integral, sans troncature ni depassement
+        # de sa cellule.
+        from fpdf import FPDF
+        from unittest import mock
+
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_totaux_extremes.pdf"
+        items = [inv.LineItem("Projet A", hours=12345.67, rate=99999999.99)]
+        subtotal, tax_amount, total = inv.compute_totals(items, tax_rate=20.0)
+
+        recorded = []
+        original_cell = FPDF.cell
+
+        def spying_cell(self, w=0, h=0, text="", *args, **kwargs):
+            recorded.append((w, text, self.get_string_width(text)))
+            return original_cell(self, w, h, text, *args, **kwargs)
+
+        with mock.patch.object(FPDF, "cell", spying_cell):
+            inv.generate_invoice_pdf(
+                output_path=output_path,
+                invoice_number="2026-0006",
+                issue_date="2026-01-15",
+                due_date=None,
+                company_name="Ma societe",
+                company_info="",
+                client_name="Client",
+                client_address="",
+                line_items=items,
+                tax_rate=20.0,
+                currency="DOLLARS AMERICAINS",
+            )
+
+        self.assertTrue(output_path.exists())
+        self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
+
+        expected_subtotal_text = inv.format_amount(subtotal, "DOLLARS AMERICAINS")
+        expected_tax_label = "TVA (20 %)"
+        expected_tax_text = inv.format_amount(tax_amount, "DOLLARS AMERICAINS")
+        expected_total_text = inv.format_amount(total, "DOLLARS AMERICAINS")
+
+        def _amount_cell_following(label_text):
+            idx = next(i for i, (_, text, _) in enumerate(recorded) if text == label_text)
+            return recorded[idx + 1]  # (largeur, texte dessine, largeur du texte) de la cellule montant
+
+        for label_text, expected_amount_text in [
+            ("Sous-total", expected_subtotal_text),
+            (expected_tax_label, expected_tax_text),
+            ("Total", expected_total_text),
+        ]:
+            width, drawn_text, drawn_width = _amount_cell_following(label_text)
+            self.assertEqual(
+                drawn_text, expected_amount_text,
+                f"le montant de la ligne '{label_text}' a ete tronque : '{drawn_text}' "
+                f"au lieu de '{expected_amount_text}'",
+            )
+            self.assertFalse(drawn_text.endswith("..."))
+            self.assertLessEqual(
+                drawn_width, width,
+                f"le texte '{drawn_text}' (largeur {drawn_width}mm) deborde de sa cellule ({width}mm)",
+            )
 
 
 class ReexportInvoicePdfTestCase(unittest.TestCase):

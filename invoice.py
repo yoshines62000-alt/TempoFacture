@@ -26,6 +26,19 @@ def _round_money(value) -> float:
     return float(Decimal(str(value)).quantize(_CENTS, rounding=ROUND_HALF_UP))
 
 
+def _round_hours(value) -> float:
+    """Meme piege que _round_money() ci-dessus, mais pour les HEURES
+    agregees d'un projet (voir build_line_items) : round() natif de Python
+    arrondit la representation binaire sous-jacente (round-half-to-even),
+    pas la valeur decimale attendue sur une facture. Une somme d'heures qui
+    tombe pres d'une frontiere x,xx5 peut ainsi etre arrondie vers le bas
+    au lieu du haut, sous-facturant silencieusement le client sur cette
+    ligne (bug trouve a l'audit, voir A1 - ex : deux entrees totalisant
+    exactement 2h40m30s = 2.675h : round() natif donne 2.67, l'arrondi
+    commercial correct est 2.68)."""
+    return float(Decimal(str(value)).quantize(_CENTS, rounding=ROUND_HALF_UP))
+
+
 @dataclass
 class LineItem:
     project_name: str
@@ -65,7 +78,7 @@ def build_line_items(time_entries: list, db) -> list:
     line_items = []
     for project_id, hours in hours_by_project.items():
         rate = db.effective_hourly_rate(project_id)
-        line_items.append(LineItem(project_name=names_by_project[project_id], hours=round(hours, 2), rate=rate))
+        line_items.append(LineItem(project_name=names_by_project[project_id], hours=_round_hours(hours), rate=rate))
     return line_items
 
 
@@ -209,15 +222,59 @@ def generate_invoice_pdf(
         pdf.ln()
 
     pdf.ln(4)
-    label_width = sum(col_widths[:3])
+    subtotal_text = format_amount(subtotal, currency)
+    tax_label = f"TVA ({tax_rate:g} %)"
+    tax_text = format_amount(tax_amount, currency)
+    total_text = format_amount(total, currency)
+
+    # Bloc de totaux (Sous-total/TVA/Total) : CONTRAIREMENT aux lignes
+    # d'articles ci-dessus, ou tronquer un libelle avec une ellipse est un
+    # compromis lisible acceptable (voir _truncate_to_width), tronquer un
+    # CHIFFRE du total rendrait le montant a payer ambigu sur le document
+    # officiel remis au client - la donnee la plus critique de toute la
+    # facture (bug trouve a l'audit, voir B1 : un montant eleve combine a
+    # une devise longue, ex. "DOLLARS AMERICAINS", tronquait desormais les
+    # chiffres eux-memes, ex. "1 481 481 88..."). Ces 3 lignes ne sont pas
+    # contraintes par un alignement de colonnes avec d'autres lignes
+    # (contrairement au tableau ci-dessus) : par defaut la mise en page
+    # reste identique a avant (colonne de 30mm alignee sous le tableau) ;
+    # ce n'est que si un montant formate deborderait de cette colonne
+    # standard qu'on retrecit la largeur du libelle (qui n'a besoin que de
+    # quelques mots courts) pour agrandir d'autant la colonne du montant,
+    # jusqu'a la largeur imprimable totale de la page - jamais de perte de
+    # chiffres.
+    standard_label_width = sum(col_widths[:3])
+    standard_amount_width = col_widths[3]
+
+    def _text_width(text: str, style: str, size: float) -> float:
+        pdf.set_font("Helvetica", style, size)
+        return pdf.get_string_width(text)
+
+    fits_standard_width = (
+        _text_width(subtotal_text, "", 10) <= standard_amount_width - 2
+        and _text_width(tax_text, "", 10) <= standard_amount_width - 2
+        and _text_width(total_text, "B", 11) <= standard_amount_width - 2
+    )
+    if fits_standard_width:
+        totals_label_width = standard_label_width
+        totals_amount_width = standard_amount_width
+    else:
+        longest_label_width = max(
+            _text_width("Sous-total", "", 10),
+            _text_width(tax_label, "", 10),
+            _text_width("Total", "B", 11),
+        )
+        totals_label_width = longest_label_width + 6
+        totals_amount_width = pdf.epw - totals_label_width
+
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(label_width, 6, "Sous-total", align="R")
-    pdf.cell(col_widths[3], 6, _truncate_to_width(format_amount(subtotal, currency), col_widths[3]), align="R", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(label_width, 6, f"TVA ({tax_rate:g} %)", align="R")
-    pdf.cell(col_widths[3], 6, _truncate_to_width(format_amount(tax_amount, currency), col_widths[3]), align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(totals_label_width, 6, "Sous-total", align="R")
+    pdf.cell(totals_amount_width, 6, subtotal_text, align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(totals_label_width, 6, tax_label, align="R")
+    pdf.cell(totals_amount_width, 6, tax_text, align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(label_width, 8, "Total", align="R")
-    pdf.cell(col_widths[3], 8, _truncate_to_width(format_amount(total, currency), col_widths[3]), align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(totals_label_width, 8, "Total", align="R")
+    pdf.cell(totals_amount_width, 8, total_text, align="R", new_x="LMARGIN", new_y="NEXT")
 
     if notes:
         pdf.ln(8)
