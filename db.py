@@ -35,10 +35,27 @@ class Database:
     methodes CRUD explicites. Pas d'ORM : le schema est simple et les
     requetes restent lisibles telles quelles."""
 
+    # Rien n'empechait auparavant de lancer deux instances de l'application
+    # pointant sur le meme fichier de donnees (double-clic accidentel sur
+    # l'exe, ou Lancer.vbs puis Lancer.bat de secours) : sqlite3.connect()
+    # etait appele sans timeout= explicite, donc avec le defaut Python de 5
+    # secondes seulement - un conflit d'ecriture entre les deux instances
+    # (ex. deux "Ajouter le client" presque simultanes) au-dela de ce delai
+    # levait un sqlite3.OperationalError ("database is locked") (bug trouve
+    # a l'audit, voir C9). 30 secondes laisse largement le temps a une
+    # ecriture concurrente normale (toujours tres breve : un simple INSERT/
+    # UPDATE) de se terminer avant d'abandonner, sans jamais bloquer
+    # indefiniment l'application en cas de vrai probleme. Si le delai est
+    # malgre tout depasse, l'exception qui en resulte est desormais
+    # correctement journalisee et signalee a l'utilisateur au lieu d'un
+    # plantage silencieux (voir gui.py, root.report_callback_exception,
+    # D1).
+    _CONNECT_TIMEOUT_SECONDS = 30.0
+
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path))
+        self.conn = sqlite3.connect(str(path), timeout=self._CONNECT_TIMEOUT_SECONDS)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._create_schema()

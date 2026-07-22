@@ -656,6 +656,35 @@ class NonLatin1ClientNameTestCase(unittest.TestCase):
         text = self._generate_and_extract_text("Client \U0001F680")
         self.assertIn("Client ?", text)
 
+    def test_common_word_punctuation_renders_legibly_not_as_question_marks(self):
+        # Regression (audit, B3) : tiret cadratin, guillemets/apostrophe
+        # courbes, puce, trademark et points de suspension - une
+        # ponctuation tres courante dans un texte colle-copie depuis
+        # Word/le web - ne fait pas partie de Latin-1 et se degradait donc
+        # en '?' epars, meme dans un texte par ailleurs lisible. Avec la
+        # police Unicode embarquee (voir B2), Noto Sans SC les affiche
+        # nativement : ce chemin (le chemin normal, police presente) ne
+        # doit plus jamais produire de '?' pour ces caracteres precis.
+        client_name = "Societe — “Guillemets” et ‘apostrophe’ • pt™…"
+        text = self._generate_and_extract_text(client_name)
+        self.assertIn(client_name, text)
+        self.assertNotIn("?", text)
+
+    def test_falls_back_word_punctuation_to_latin1_equivalents_when_font_file_missing(self):
+        # Meme scenario que ci-dessus, mais sur le chemin de secours
+        # _latin1_safe() (police Unicode introuvable, voir
+        # test_falls_back_to_latin1_safe_when_the_font_file_is_missing) :
+        # cette ponctuation courante doit desormais etre convertie vers son
+        # equivalent Latin-1 lisible AVANT le remplacement generique par
+        # '?', plutot que de degrader en '?' comme le reste du texte hors
+        # Latin-1 (bug trouve a l'audit, voir B3).
+        from unittest import mock
+
+        with mock.patch.object(inv, "_resource_path", return_value=Path("chemin/inexistant.otf")):
+            text = self._generate_and_extract_text("Societe — “Special”™…")
+        self.assertIn('Societe - "Special"(TM)...', text)
+        self.assertNotIn("?", text)
+
 
 class ReexportInvoicePdfTestCase(unittest.TestCase):
     def setUp(self):

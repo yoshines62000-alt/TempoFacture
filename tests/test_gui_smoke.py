@@ -55,6 +55,25 @@ class GuiSmokeTestCase(unittest.TestCase):
             self.app._invoice_search_after_id = None
         self.app._refresh_invoices()
 
+    def _set_client_search(self, text: str):
+        """Meme principe que _set_invoice_search, pour la recherche
+        Clients (voir C3 : debounce desormais generalise a Clients/Projets,
+        pas seulement Factures)."""
+        self.app.client_search_var.set(text)
+        if self.app._client_search_after_id is not None:
+            self.app.root.after_cancel(self.app._client_search_after_id)
+            self.app._client_search_after_id = None
+        self.app._refresh_clients()
+
+    def _set_project_search(self, text: str):
+        """Meme principe que _set_invoice_search, pour la recherche
+        Projets (voir C3)."""
+        self.app.project_search_var.set(text)
+        if self.app._project_search_after_id is not None:
+            self.app.root.after_cancel(self.app._project_search_after_id)
+            self.app._project_search_after_id = None
+        self.app._refresh_projects()
+
     # -- item 1 : avertissement avant d'archiver un client avec des heures --
     # -- non facturees --------------------------------------------------------
 
@@ -155,13 +174,30 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_clients()
         self.assertEqual(len(self.app.clients_tree.get_children()), 2)
 
-        self.app.client_search_var.set("acme")
+        # La recherche est debouncee (voir SEARCH_DEBOUNCE_MS, bug trouve a
+        # l'audit, voir C3) : on force le rafraichissement immediatement
+        # via _set_client_search plutot que d'attendre un vrai sleep.
+        self._set_client_search("acme")
         self.assertEqual(len(self.app.clients_tree.get_children()), 1)
         remaining_id = self.app.clients_tree.get_children()[0]
         self.assertEqual(self.app.clients_tree.item(remaining_id, "values")[1], "Acme Corp")
 
-        self.app.client_search_var.set("")
+        self._set_client_search("")
         self.assertEqual(len(self.app.clients_tree.get_children()), 2)
+
+    def test_client_search_is_debounced_instead_of_refreshing_on_every_keystroke(self):
+        # Verrouille specifiquement le correctif C3 : taper NE doit PAS
+        # rafraichir la liste de facon synchrone (contrairement au
+        # comportement d'avant ce correctif) - un rafraichissement est
+        # seulement planifie via root.after(), pas execute immediatement.
+        self.app.db.add_client("Acme Corp")
+        self.app._refresh_clients()
+        self.assertEqual(len(self.app.clients_tree.get_children()), 1)
+
+        with patch.object(self.app, "_refresh_clients") as mock_refresh:
+            self.app.client_search_var.set("acme")
+        mock_refresh.assert_not_called()
+        self.assertIsNotNone(self.app._client_search_after_id)
 
     def test_project_search_filters_by_project_or_client_name(self):
         client_id = self.app.db.add_client("Client Recherche")
@@ -170,14 +206,29 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_projects()
         self.assertEqual(len(self.app.projects_tree.get_children()), 2)
 
-        self.app.project_search_var.set("vitrine")
+        # Voir le commentaire equivalent ci-dessus (bug trouve a l'audit,
+        # voir C3) : recherche debouncee.
+        self._set_project_search("vitrine")
         self.assertEqual(len(self.app.projects_tree.get_children()), 1)
 
-        self.app.project_search_var.set("client recherche")
+        self._set_project_search("client recherche")
         self.assertEqual(len(self.app.projects_tree.get_children()), 2)
 
-        self.app.project_search_var.set("introuvable")
+        self._set_project_search("introuvable")
         self.assertEqual(len(self.app.projects_tree.get_children()), 0)
+
+    def test_project_search_is_debounced_instead_of_refreshing_on_every_keystroke(self):
+        # Voir le commentaire equivalent ci-dessus pour Clients (bug trouve
+        # a l'audit, voir C3).
+        client_id = self.app.db.add_client("Client Recherche")
+        self.app.db.add_project(client_id, "Site vitrine")
+        self.app._refresh_projects()
+        self.assertEqual(len(self.app.projects_tree.get_children()), 1)
+
+        with patch.object(self.app, "_refresh_projects") as mock_refresh:
+            self.app.project_search_var.set("vitrine")
+        mock_refresh.assert_not_called()
+        self.assertIsNotNone(self.app._project_search_after_id)
 
     # -- item audit Phase 4, C1 : le taux effectif pre-calcule en Python ---
     # -- reste correct pour un projet avec taux propre ET un projet qui ----
@@ -335,6 +386,94 @@ class GuiSmokeTestCase(unittest.TestCase):
         result = self.app._prompt_time_entry_fields("Modifier l'entree", "2.5", "Description")
         self.assertIsNone(result)
 
+    # -- item audit, E3b : reassignation du projet d'une entree de temps ---
+    # -- desormais exposee dans le dialogue d'edition (auparavant, seule la
+    # -- suppression + ressaisie permettait de corriger une entree saisie --
+    # -- sur le mauvais projet, alors que update_time_entry() supportait --
+    # -- deja pleinement ce champ cote base) --------------------------------
+
+    def test_time_entry_edit_dialog_preselects_the_current_project(self):
+        client_id = self.app.db.add_client("Client")
+        project_a = self.app.db.add_project(client_id, "Projet A")
+        project_b = self.app.db.add_project(client_id, "Projet B")
+
+        # Valide immediatement sans toucher au selecteur (Entree simulee) :
+        # si le projet courant n'etait pas preselectionne, le resultat
+        # renverrait un project_id vide/incorrect plutot que project_a.
+        self.app.root.after(50, self._invoke_return_on_open_dialog)
+        result = self.app._prompt_time_entry_fields(
+            "Modifier l'entree", "2.5", "Description",
+            current_project_id=project_a,
+            project_choices=[(project_a, f"{project_a} - Projet A"), (project_b, f"{project_b} - Projet B")],
+        )
+        self.assertEqual(result["project_id"], project_a)
+
+    def test_double_click_edit_time_entry_can_reassign_the_project(self):
+        client_id = self.app.db.add_client("Client")
+        original_project = self.app.db.add_project(client_id, "Projet original")
+        other_project = self.app.db.add_project(client_id, "Autre projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            original_project, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00", "Travail"
+        )
+        self.app._refresh_time_entries()
+
+        with patch.object(
+            self.app, "_prompt_time_entry_fields",
+            return_value={"hours": "1.00", "description": "Travail", "project_id": other_project},
+        ):
+            self.app.entries_tree.selection_set(str(entry_id))
+            self.app._edit_time_entry()
+
+        entry = self.app.db.get_time_entry(entry_id)
+        self.assertEqual(entry["project_id"], other_project)
+
+    def test_double_click_edit_time_entry_without_changing_project_leaves_it_untouched(self):
+        # Renvoyer le MEME project_id (ex. l'utilisateur rouvre le
+        # dialogue sans toucher au selecteur) ne doit rien declencher de
+        # particulier - en especes sur une entree deja facturee, ou envoyer
+        # project_id a l'identique bloquerait a tort la simple correction
+        # de description (meme logique que pour les heures, voir plus haut
+        # dans _edit_time_entry).
+        client_id = self.app.db.add_client("Client")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00", "Ancienne description"
+        )
+        self.app.db.create_invoice(client_id, [entry_id])
+        self.app._refresh_time_entries()
+
+        with patch.object(
+            self.app, "_prompt_time_entry_fields",
+            return_value={"hours": "1.00", "description": "Nouvelle description", "project_id": project_id},
+        ):
+            self.app.entries_tree.selection_set(str(entry_id))
+            self.app._edit_time_entry()
+
+        entry = self.app.db.get_time_entry(entry_id)
+        self.assertEqual(entry["project_id"], project_id)
+        self.assertEqual(entry["description"], "Nouvelle description")
+
+    def test_double_click_edit_time_entry_reassigning_project_on_invoiced_entry_shows_a_warning(self):
+        client_id = self.app.db.add_client("Client")
+        original_project = self.app.db.add_project(client_id, "Projet original")
+        other_project = self.app.db.add_project(client_id, "Autre projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            original_project, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        self.app.db.create_invoice(client_id, [entry_id])
+        self.app._refresh_time_entries()
+
+        with patch.object(
+            self.app, "_prompt_time_entry_fields",
+            return_value={"hours": "1.00", "description": "", "project_id": other_project},
+        ), patch("tkinter.messagebox.showwarning") as mock_warn:
+            self.app.entries_tree.selection_set(str(entry_id))
+            self.app._edit_time_entry()
+
+        mock_warn.assert_called_once()
+        entry = self.app.db.get_time_entry(entry_id)
+        self.assertEqual(entry["project_id"], original_project)  # jamais reassignee
+
     def test_invoice_search_filters_by_number_client_or_status(self):
         client_id = self.app.db.add_client("Client Facture")
         project_id = self.app.db.add_project(client_id, "Projet")
@@ -345,7 +484,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_invoices()
         self.assertEqual(len(self.app.invoices_tree.get_children()), 1)
 
-        # La recherche est debouncee (voir INVOICE_SEARCH_DEBOUNCE_MS) : taper
+        # La recherche est debouncee (voir SEARCH_DEBOUNCE_MS) : taper
         # ne rafraichit plus la liste de facon synchrone. On annule le
         # rafraichissement en attente et on le declenche nous-memes pour
         # garder ce test deterministe et rapide (pas de vrai sleep).
@@ -594,6 +733,65 @@ class GuiSmokeTestCase(unittest.TestCase):
             "Merci de votre confiance. TVA non applicable, art. 293 B du CGI",
         )
 
+    # -- item audit, A7 : garde-fou de vraisemblance sur un taux de TVA ----
+    # -- improbable (> 100 %, ex. une faute de frappe d'un zero en trop) ---
+
+    def _prepare_invoiceable_client(self):
+        client_id = self.app.db.add_client("Client TVA")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        self.app._refresh_time_entries()
+        self.app.invoice_client_var.set(f"{client_id} - Client TVA")
+        return client_id
+
+    def test_tax_rate_above_100_percent_asks_for_confirmation(self):
+        self._prepare_invoiceable_client()
+        self.app.invoice_tax_var.set("200")
+
+        with patch("tkinter.messagebox.askyesno", return_value=False) as askyesno, \
+             patch("tkinter.filedialog.asksaveasfilename") as mock_save_dialog:
+            self.app._generate_invoice()
+
+        askyesno.assert_called_once()
+        message = askyesno.call_args[0][1]
+        self.assertIn("200", message)
+        # Refus de la confirmation : on ne va meme pas jusqu'au dialogue
+        # d'enregistrement du PDF, et aucune facture n'est creee.
+        mock_save_dialog.assert_not_called()
+        self.assertEqual(self.app.db.list_invoices(), [])
+
+    def test_confirming_the_unusual_tax_rate_still_generates_the_invoice(self):
+        self._prepare_invoiceable_client()
+        self.app.invoice_tax_var.set("200")
+        output_path = self.tmp / "facture_tva_200.pdf"
+
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
+             patch("tkinter.messagebox.askyesno", return_value=True):
+            self.app._generate_invoice()
+
+        invoices = self.app.db.list_invoices()
+        self.assertEqual(len(invoices), 1)
+        self.assertEqual(invoices[0]["tax_rate"], 200.0)
+        self.assertTrue(output_path.exists())
+
+    def test_tax_rate_at_exactly_100_percent_needs_no_confirmation(self):
+        self._prepare_invoiceable_client()
+        self.app.invoice_tax_var.set("100")
+        output_path = self.tmp / "facture_tva_100.pdf"
+
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
+             patch("tkinter.messagebox.askyesno") as askyesno:
+            self.app._generate_invoice()
+
+        # A 100% pile, pas au-dela : askyesno n'est sollicite que pour la
+        # question finale "Ouvrir le PDF ?", pas pour une confirmation de
+        # vraisemblance du taux.
+        for call in askyesno.call_args_list:
+            self.assertNotIn("inhabituel", call[0][1].lower())
+        self.assertEqual(len(self.app.db.list_invoices()), 1)
+
     def test_insert_tva_exemption_note_does_not_duplicate_if_already_present(self):
         self.app.invoice_notes_var.set("Deja present : TVA non applicable, art. 293 B du CGI")
         self.app._insert_tva_exemption_note()
@@ -783,6 +981,34 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertEqual(self.app.timer_project_var.get(), f"{project_id} - Projet sans description")
         self.assertEqual(self.app.timer_description_var.get(), "")
 
+    # -- item audit, E4 : les colonnes des tableaux doivent absorber -------
+    # -- l'espace disponible au redimensionnement, mais seulement les -----
+    # -- colonnes de texte libre (pas ID/taux/statut, qui grandissaient ----
+    # -- auparavant de facon egale et peu utile - stretch=1 est le defaut --
+    # -- ttk pour TOUTES les colonnes) --------------------------------------
+
+    def test_only_free_text_columns_stretch_when_the_window_grows(self):
+        self.root.deiconify()
+        self.root.update_idletasks()
+        initial_name_width = self.app.clients_tree.column("name", "width")
+        initial_id_width = self.app.clients_tree.column("id", "width")
+
+        self.root.geometry("1400x900")
+        self.root.update_idletasks()
+        self.root.update()
+
+        self.assertGreater(self.app.clients_tree.column("name", "width"), initial_name_width)
+        self.assertEqual(self.app.clients_tree.column("id", "width"), initial_id_width)
+        self.assertEqual(self.app.clients_tree.column("rate", "stretch"), 0)
+        self.assertEqual(self.app.clients_tree.column("archived", "stretch"), 0)
+
+    def test_id_and_status_columns_are_configured_as_non_stretching_across_all_trees(self):
+        # Non-regression generale : verrouille que la colonne ID (partout
+        # ou elle existe) ne recoit jamais stretch=True, plutot que de
+        # devoir mettre a jour ce test a chaque nouveau tableau ajoute.
+        for tree in (self.app.clients_tree, self.app.projects_tree, self.app.entries_tree, self.app.invoices_tree):
+            self.assertEqual(tree.column("id", "stretch"), 0)
+
     def test_no_running_timer_leaves_the_fields_untouched(self):
         # Non-regression : quand aucun chronometre n'est en cours (cas
         # courant), _restore_running_timer() doit continuer a ne rien faire.
@@ -792,6 +1018,113 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._restore_running_timer()
 
         self.assertEqual(self.app.timer_description_var.get(), "valeur avant appel")
+
+    # -- item audit, F1 : la date par defaut de la saisie manuelle doit ----
+    # -- etre en UTC, comme le reste de l'application (l'echeance des ------
+    # -- factures notamment), pas en heure locale ---------------------------
+
+    # -- item audit, H1 : la verification de mise a jour au demarrage doit -
+    # -- pouvoir etre desactivee depuis les Parametres (auparavant ---------
+    # -- inconditionnelle) ---------------------------------------------------
+
+    def test_update_check_runs_by_default(self):
+        with patch.object(gui.update_checker, "start_update_check") as mock_start:
+            self.app._maybe_start_update_check()
+        mock_start.assert_called_once()
+
+    def test_update_check_is_skipped_when_disabled_in_settings(self):
+        self.app.db.set_setting("check_updates_on_startup", "0")
+        with patch.object(gui.update_checker, "start_update_check") as mock_start:
+            self.app._maybe_start_update_check()
+        mock_start.assert_not_called()
+
+    def test_settings_checkbox_reflects_and_persists_the_update_check_preference(self):
+        # Coche par defaut (comportement inchange).
+        self.assertTrue(self.app.setting_check_updates_var.get())
+
+        self.app.setting_check_updates_var.set(False)
+        with patch("tkinter.messagebox.showinfo"):
+            self.app._save_settings()
+        self.assertEqual(self.app.db.get_setting("check_updates_on_startup"), "0")
+
+        self.app.setting_check_updates_var.set(True)
+        with patch("tkinter.messagebox.showinfo"):
+            self.app._save_settings()
+        self.assertEqual(self.app.db.get_setting("check_updates_on_startup"), "1")
+
+    def test_manual_entry_date_defaults_to_todays_utc_date_not_local_date(self):
+        from datetime import datetime, timezone
+
+        expected = datetime.now(timezone.utc).date().isoformat()
+        self.assertEqual(self.app.manual_date_var.get(), expected)
+
+    # -- item audit, L1 : _generate_invoice et _duplicate_invoice partagent
+    # -- desormais _compute_due_date()/_write_invoice_pdf_or_rollback() au -
+    # -- lieu de dupliquer integralement ce code - _duplicate_invoice --------
+    # -- n'avait auparavant AUCUNE couverture de test dans ce fichier --------
+    # -- (angle mort signale par l'audit, section L3) ------------------------
+
+    def _create_source_invoice(self):
+        client_id = self.app.db.add_client("Client Recurrent", hourly_rate=50.0)
+        project_id = self.app.db.add_project(client_id, "Forfait mensuel")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00"
+        )
+        invoice_id = self.app.db.create_invoice(
+            client_id, [entry_id], tax_rate=20.0,
+            line_items=gui.build_line_items(self.app.db.list_time_entries(project_id=project_id), self.app.db),
+        )
+        self.app._refresh_invoices()
+        return client_id, invoice_id
+
+    def test_duplicate_invoice_creates_a_new_invoice_with_the_same_line_items_and_computed_due_date(self):
+        client_id, invoice_id = self._create_source_invoice()
+        self.app.invoices_tree.selection_set(str(invoice_id))
+        output_path = self.tmp / "dup.pdf"
+
+        # askyesno est sollicite deux fois par _duplicate_invoice : d'abord
+        # pour confirmer la duplication elle-meme (AVANT la creation), puis
+        # a la fin pour proposer d'ouvrir le PDF - return_value=True couvre
+        # les deux ; webbrowser.open est mocke pour ne pas ouvrir un vrai
+        # navigateur pendant le test.
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
+             patch("tkinter.messagebox.askyesno", return_value=True), \
+             patch.object(gui.webbrowser, "open"):
+            self.app._duplicate_invoice()
+
+        invoices = self.app.db.list_invoices()
+        self.assertEqual(len(invoices), 2)
+        new_invoice = next(inv for inv in invoices if inv["id"] != invoice_id)
+        self.assertEqual(new_invoice["client_id"], client_id)
+        self.assertEqual(new_invoice["tax_rate"], 20.0)
+        self.assertEqual(new_invoice["due_date"], self.app._compute_due_date())
+        new_items = self.app.db.get_invoice_line_items(new_invoice["id"])
+        self.assertEqual(len(new_items), 1)
+        self.assertEqual(new_items[0]["rate"], 50.0)
+        self.assertTrue(output_path.exists())
+        self.assertTrue(output_path.read_bytes().startswith(b"%PDF"))
+
+    def test_duplicate_invoice_rolls_back_when_pdf_generation_fails(self):
+        # Meme garde-fou anti-facture-fantome que _generate_invoice (voir
+        # test_generating_invoice_with_non_latin1_currency_creates_no_phantom_invoice
+        # ci-dessus), desormais partage via _write_invoice_pdf_or_rollback :
+        # si la generation du PDF echoue, la facture nouvellement creee
+        # doit etre annulee (jamais laissee en base sans PDF correspondant).
+        client_id, invoice_id = self._create_source_invoice()
+        self.app.invoices_tree.selection_set(str(invoice_id))
+        output_path = self.tmp / "dup_echec.pdf"
+
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
+             patch("tkinter.messagebox.askyesno", return_value=True), \
+             patch("tkinter.messagebox.showerror") as mock_error, \
+             patch.object(gui, "generate_invoice_pdf", side_effect=RuntimeError("panne simulee")):
+            self.app._duplicate_invoice()
+
+        mock_error.assert_called_once()
+        # Toujours une seule facture (la source) : aucune facture fantome
+        # n'a ete laissee en base suite a l'echec de generation du PDF.
+        self.assertEqual(len(self.app.db.list_invoices()), 1)
+        self.assertFalse(output_path.exists())
 
 
 if __name__ == "__main__":

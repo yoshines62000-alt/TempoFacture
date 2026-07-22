@@ -143,5 +143,94 @@ class CsvExportFormulaInjectionTestCase(unittest.TestCase):
         self.assertTrue(rows[1][6].startswith("'-"))
 
 
+class AtomicCsvWriteTestCase(unittest.TestCase):
+    """Verrouille le correctif C8 : un echec en cours d'ecriture ne doit
+    jamais laisser de fichier CSV tronque au chemin de destination final -
+    voir _atomic_csv_write (ecriture dans un fichier temporaire puis
+    os.replace())."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = Database(self.tmp / "test.sqlite")
+        self.addCleanup(self.db.close)
+        self.client_id = self.db.add_client("Client Test", hourly_rate=50.0)
+        self.project_id = self.db.add_project(self.client_id, "Projet Test")
+        self.db.add_manual_time_entry(
+            self.project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T11:00:00+00:00", "Travail"
+        )
+
+    def test_no_partial_file_is_left_when_writing_fails_partway_through(self):
+        entries = list(self.db.list_time_entries()) * 5  # plusieurs lignes, pour ecrire "en cours de route"
+        output = self.tmp / "entries.csv"
+
+        class _FlakyFile:
+            """Enveloppe le vrai fichier temporaire ouvert par
+            _atomic_csv_write : laisse passer les premieres ecritures (donc
+            un fichier temporaire partiel existe bel et bien sur le disque
+            a ce stade), puis simule une panne (disque plein...) en cours
+            de route, comme le ferait un vrai OSError d'ecriture."""
+
+            def __init__(self, real_file):
+                self._real_file = real_file
+                self._write_count = 0
+
+            def write(self, data):
+                self._write_count += 1
+                if self._write_count == 3:
+                    raise OSError("disque plein (simule)")
+                return self._real_file.write(data)
+
+            def __getattr__(self, name):
+                return getattr(self._real_file, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self._real_file.close()
+                return False
+
+        original_fdopen = csv_export.os.fdopen
+
+        def patched_fdopen(fd, *args, **kwargs):
+            return _FlakyFile(original_fdopen(fd, *args, **kwargs))
+
+        from unittest import mock
+
+        with mock.patch("csv_export.os.fdopen", side_effect=patched_fdopen):
+            with self.assertRaises(OSError):
+                csv_export.export_time_entries_csv(entries, output)
+
+        # Aucun fichier - ni tronque au chemin final, ni fichier temporaire
+        # orphelin - ne doit subsister.
+        self.assertFalse(output.exists())
+        leftover = list(self.tmp.glob(f".{output.name}.*"))
+        self.assertEqual(leftover, [])
+
+    def test_export_does_not_overwrite_the_destination_until_fully_written(self):
+        from unittest import mock
+
+        output = self.tmp / "entries.csv"
+        output.write_text("ancien contenu complet\n", encoding="utf-8")
+
+        with mock.patch("csv_export.os.replace", side_effect=OSError("permission refusee (simule)")):
+            with self.assertRaises(OSError):
+                csv_export.export_time_entries_csv(list(self.db.list_time_entries()), output)
+
+        # Le fichier de destination existant n'a jamais ete touche : os.replace()
+        # est le tout dernier appel, une fois l'ecriture complete deja
+        # reussie dans le fichier temporaire.
+        self.assertEqual(output.read_text(encoding="utf-8"), "ancien contenu complet\n")
+        leftover = list(self.tmp.glob(f".{output.name}.*"))
+        self.assertEqual(leftover, [])
+
+    def test_successful_export_leaves_no_temporary_file_behind(self):
+        output = self.tmp / "entries.csv"
+        csv_export.export_time_entries_csv(list(self.db.list_time_entries()), output)
+        self.assertTrue(output.exists())
+        leftover = list(self.tmp.glob(f".{output.name}.*"))
+        self.assertEqual(leftover, [])
+
+
 if __name__ == "__main__":
     unittest.main()

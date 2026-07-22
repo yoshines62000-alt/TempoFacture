@@ -8,7 +8,7 @@ import queue
 import sys
 import webbrowser
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, StringVar, Tk, ttk, messagebox, simpledialog
+from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, StringVar, Tk, ttk, messagebox, simpledialog
 
 import update_checker
 from db import Database, TVA_EXEMPTION_NOTE
@@ -23,7 +23,7 @@ UPDATE_REPO = "yoshines62000-alt/TempoFacture"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
 IDLE_CHECK_INTERVAL_MS = 15_000
-INVOICE_SEARCH_DEBOUNCE_MS = 250  # attend une pause dans la frappe avant de rafraichir la liste des factures
+SEARCH_DEBOUNCE_MS = 250  # attend une pause dans la frappe avant de rafraichir une liste (factures/clients/projets)
 LOG_FILE_NAME = "tempofacture.log"
 
 _logger = logging.getLogger("tempofacture")
@@ -149,8 +149,7 @@ class TempoFactureApp:
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
         self._update_check_queue = queue.Queue()
-        update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
-        self.root.after(500, self._poll_update_check)
+        self._maybe_start_update_check()
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
@@ -190,6 +189,22 @@ class TempoFactureApp:
         self._tick_timer()
         self._check_idle()
 
+    def _maybe_start_update_check(self):
+        """Lance la verification de mise a jour au demarrage, sauf si
+        l'utilisateur l'a desactivee depuis l'onglet Parametres. Activee
+        par defaut ("1") pour ne pas changer le comportement existant :
+        cette verification (simple GET vers l'API publique GitHub, aucune
+        donnee personnelle ni identifiant machine transmis, voir
+        update_checker.py) etait auparavant inconditionnelle, sans aucun
+        moyen de la desactiver - ce qui nuancait legerement l'affirmation
+        du README/de l'onglet Parametres selon laquelle aucune connexion
+        internet n'est necessaire (bug trouve a l'audit, voir H1). Extrait
+        de __init__() dans sa propre methode pour rester testable
+        isolement (voir tests/test_gui_smoke.py)."""
+        if self.db.get_setting("check_updates_on_startup", "1") == "1":
+            update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
+            self.root.after(500, self._poll_update_check)
+
     def _poll_update_check(self):
         try:
             status, tag = self._update_check_queue.get_nowait()
@@ -221,6 +236,25 @@ class TempoFactureApp:
         if not combo_value:
             return None
         return int(combo_value.split(" - ", 1)[0])
+
+    @staticmethod
+    def _configure_tree_columns(tree, columns_spec, growable_columns=()):
+        """Configure les colonnes d'un Treeview a partir de
+        columns_spec = [(col, label, largeur_initiale), ...].
+
+        Par defaut, ttk etend TOUTES les colonnes (stretch=1) pour occuper
+        l'espace supplementaire quand la fenetre s'agrandit - mais de facon
+        egale, y compris des colonnes qui n'ont pas vocation a grandir (ID,
+        montant, statut...), ce qui gaspille l'espace disponible sur des
+        colonnes numeriques etroites au lieu de l'offrir a la colonne de
+        texte libre qui en beneficierait reellement (ex. Description/
+        Adresse - bug trouve a l'audit, voir E4). Seules les colonnes
+        listees dans growable_columns recoivent stretch=True ; toutes les
+        autres sont fixees a leur largeur initiale (stretch=False), qui ne
+        bougent donc plus au redimensionnement."""
+        for col, label, width in columns_spec:
+            tree.heading(col, text=label)
+            tree.column(col, width=width, anchor="w", stretch=col in growable_columns)
 
     # -- onglet Clients -------------------------------------------------------
 
@@ -263,16 +297,25 @@ class TempoFactureApp:
         ttk.Label(search_row, text="Rechercher :").pack(side=LEFT)
         self.client_search_var = StringVar()
         ttk.Entry(search_row, textvariable=self.client_search_var, width=30).pack(side=LEFT, padx=5)
-        self.client_search_var.trace_add("write", lambda *_: self._refresh_clients())
+        self._client_search_after_id = None
+        # Debounce (voir SEARCH_DEBOUNCE_MS) : ce mecanisme n'existait
+        # auparavant que pour la recherche Factures, pas pour Clients/
+        # Projets, qui rafraichissaient donc la liste entiere a CHAQUE
+        # frappe - une incoherence de robustesse entre les 3 recherches de
+        # l'application, aggravee par le pattern N+1 corrige en C1 (bug
+        # trouve a l'audit, voir C3).
+        self.client_search_var.trace_add("write", lambda *_: self._on_client_search_changed())
 
         columns = ("id", "name", "email", "rate", "archived")
         self.clients_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
-        for col, label, width in [
-            ("id", "ID", 40), ("name", "Nom", 200), ("email", "Email", 200),
-            ("rate", "Taux horaire", 100), ("archived", "Archive", 70),
-        ]:
-            self.clients_tree.heading(col, text=label)
-            self.clients_tree.column(col, width=width, anchor="w")
+        self._configure_tree_columns(
+            self.clients_tree,
+            [
+                ("id", "ID", 40), ("name", "Nom", 200), ("email", "Email", 200),
+                ("rate", "Taux horaire", 100), ("archived", "Archive", 70),
+            ],
+            growable_columns=("name", "email"),
+        )
         self.clients_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
         self.clients_tree.bind("<Double-1>", self._edit_client)
 
@@ -303,6 +346,20 @@ class TempoFactureApp:
         self.client_rate_var.set("0")
         self._refresh_clients()
         self._refresh_timer_project_choices()
+
+    def _on_client_search_changed(self):
+        # Meme mecanisme de debounce que _on_invoice_search_changed (voir
+        # SEARCH_DEBOUNCE_MS) : annule un rafraichissement encore en
+        # attente et en reprogramme un seul, apres une courte pause dans la
+        # frappe, plutot que de rafraichir a chaque caractere tape (bug
+        # trouve a l'audit, voir C3).
+        if self._client_search_after_id is not None:
+            self.root.after_cancel(self._client_search_after_id)
+        self._client_search_after_id = self.root.after(SEARCH_DEBOUNCE_MS, self._run_debounced_client_refresh)
+
+    def _run_debounced_client_refresh(self):
+        self._client_search_after_id = None
+        self._refresh_clients()
 
     def _refresh_clients(self):
         self.clients_tree.delete(*self.clients_tree.get_children())
@@ -488,16 +545,21 @@ class TempoFactureApp:
         ttk.Label(search_row, text="Rechercher :").pack(side=LEFT)
         self.project_search_var = StringVar()
         ttk.Entry(search_row, textvariable=self.project_search_var, width=30).pack(side=LEFT, padx=5)
-        self.project_search_var.trace_add("write", lambda *_: self._refresh_projects())
+        self._project_search_after_id = None
+        # Voir le commentaire equivalent dans _build_clients_tab (bug
+        # trouve a l'audit, voir C3) : debounce de la recherche.
+        self.project_search_var.trace_add("write", lambda *_: self._on_project_search_changed())
 
         columns = ("id", "client", "name", "rate", "archived")
         self.projects_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
-        for col, label, width in [
-            ("id", "ID", 40), ("client", "Client", 160), ("name", "Projet", 200),
-            ("rate", "Taux effectif", 110), ("archived", "Archive", 70),
-        ]:
-            self.projects_tree.heading(col, text=label)
-            self.projects_tree.column(col, width=width, anchor="w")
+        self._configure_tree_columns(
+            self.projects_tree,
+            [
+                ("id", "ID", 40), ("client", "Client", 160), ("name", "Projet", 200),
+                ("rate", "Taux effectif", 110), ("archived", "Archive", 70),
+            ],
+            growable_columns=("client", "name"),
+        )
         self.projects_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
         self.projects_tree.bind("<Double-1>", self._edit_project)
 
@@ -530,6 +592,17 @@ class TempoFactureApp:
         self.project_rate_var.set("")
         self._refresh_projects()
         self._refresh_timer_project_choices()
+
+    def _on_project_search_changed(self):
+        # Voir le commentaire equivalent dans _on_client_search_changed
+        # (bug trouve a l'audit, voir C3).
+        if self._project_search_after_id is not None:
+            self.root.after_cancel(self._project_search_after_id)
+        self._project_search_after_id = self.root.after(SEARCH_DEBOUNCE_MS, self._run_debounced_project_refresh)
+
+    def _run_debounced_project_refresh(self):
+        self._project_search_after_id = None
+        self._refresh_projects()
 
     def _refresh_projects(self):
         clients, client_labels = self._client_choices()
@@ -686,8 +759,18 @@ class TempoFactureApp:
 
         manual = ttk.LabelFrame(frame, text="Ajouter une entree manuelle (heures)")
         manual.pack(fill=X, padx=10, pady=20)
-        from datetime import date as _date
-        self.manual_date_var = StringVar(value=_date.today().isoformat())
+        from datetime import datetime as _datetime, timezone as _timezone
+        # date.today() (heure LOCALE) melangerait deux fuseaux differents :
+        # _add_manual_entry() construit ensuite l'horodatage effectif de
+        # l'entree a partir de datetime.now(timezone.utc) (voir plus bas),
+        # dont seuls year/month/day sont remplaces par cette date - entre
+        # minuit UTC et minuit local, la date locale du jour suggeree par
+        # defaut ne correspond alors plus au jour calendaire UTC courant,
+        # decalant silencieusement l'entree d'un jour pour un utilisateur
+        # hors du fuseau UTC (meme piege deja identifie et corrige pour
+        # l'echeance des factures, voir _compute_due_date - bug trouve a
+        # l'audit, voir F1).
+        self.manual_date_var = StringVar(value=_datetime.now(_timezone.utc).date().isoformat())
         self.manual_hours_var = StringVar()
         ttk.Label(manual, text="Date de fin (AAAA-MM-JJ)").pack(side=LEFT, padx=5, pady=8)
         self.manual_date_entry = ttk.Entry(manual, textvariable=self.manual_date_var, width=12)
@@ -703,12 +786,14 @@ class TempoFactureApp:
 
         columns = ("id", "project", "start", "end", "hours", "description")
         self.entries_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
-        for col, label, width in [
-            ("id", "ID", 40), ("project", "Projet", 140), ("start", "Debut", 150),
-            ("end", "Fin", 150), ("hours", "Heures", 70), ("description", "Description", 200),
-        ]:
-            self.entries_tree.heading(col, text=label)
-            self.entries_tree.column(col, width=width, anchor="w")
+        self._configure_tree_columns(
+            self.entries_tree,
+            [
+                ("id", "ID", 40), ("project", "Projet", 140), ("start", "Debut", 150),
+                ("end", "Fin", 150), ("hours", "Heures", 70), ("description", "Description", 200),
+            ],
+            growable_columns=("project", "description"),
+        )
         self.entries_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
         self.entries_tree.bind("<Double-1>", self._edit_time_entry)
 
@@ -877,9 +962,19 @@ class TempoFactureApp:
         self._refresh_time_entries()
         self._refresh_invoices()
 
-    def _prompt_time_entry_fields(self, title: str, initial_hours: str, initial_description: str):
-        """Petit dialogue (heures, description) - renvoie (hours_text,
-        description) ou None si annule."""
+    def _prompt_time_entry_fields(
+        self, title: str, initial_hours: str, initial_description: str,
+        current_project_id=None, project_choices=None,
+    ):
+        """Petit dialogue (heures, description, et optionnellement projet) -
+        renvoie un dict ou None si annule. project_choices (liste de
+        (id, label)) n'est fourni QUE par _edit_time_entry : quand present,
+        un selecteur de projet est ajoute au dialogue et le resultat
+        contient une cle "project_id" en plus de "hours"/"description" -
+        auparavant aucun chemin GUI ne permettait de reassigner une entree
+        de temps a un autre projet (la seule solution etait de la supprimer
+        et de la ressaisir), alors que update_time_entry() supportait deja
+        pleinement ce champ cote base (bug trouve a l'audit, voir E3b)."""
         from tkinter import Toplevel
 
         dialog = Toplevel(self.root)
@@ -892,18 +987,36 @@ class TempoFactureApp:
         desc_var = StringVar(value=initial_description)
         result = {}
 
-        ttk.Label(dialog, text="Heures").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
-        ttk.Entry(dialog, textvariable=hours_var, width=15).grid(row=0, column=1, padx=10, pady=(10, 5))
-        ttk.Label(dialog, text="Description").grid(row=1, column=0, sticky="w", padx=10)
-        ttk.Entry(dialog, textvariable=desc_var, width=30).grid(row=1, column=1, padx=10, pady=(0, 10))
+        row = 0
+        project_var = None
+        if project_choices is not None:
+            project_var = StringVar()
+            for project_id, label in project_choices:
+                if project_id == current_project_id:
+                    project_var.set(label)
+                    break
+            ttk.Label(dialog, text="Projet").grid(row=row, column=0, sticky="w", padx=10, pady=(10, 5))
+            project_combo = ttk.Combobox(dialog, textvariable=project_var, width=28, state="readonly")
+            project_combo["values"] = [label for _, label in project_choices]
+            project_combo.grid(row=row, column=1, padx=10, pady=(10, 5))
+            row += 1
+
+        ttk.Label(dialog, text="Heures").grid(row=row, column=0, sticky="w", padx=10, pady=(10 if row == 0 else 0, 5))
+        ttk.Entry(dialog, textvariable=hours_var, width=15).grid(row=row, column=1, padx=10, pady=(10 if row == 0 else 0, 5))
+        row += 1
+        ttk.Label(dialog, text="Description").grid(row=row, column=0, sticky="w", padx=10)
+        ttk.Entry(dialog, textvariable=desc_var, width=30).grid(row=row, column=1, padx=10, pady=(0, 10))
+        row += 1
 
         def on_ok():
             result["hours"] = hours_var.get().strip()
             result["description"] = desc_var.get().strip()
+            if project_var is not None:
+                result["project_id"] = self._parse_id(project_var.get())
             dialog.destroy()
 
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=2, column=0, columnspan=2, pady=(0, 10))
+        buttons.grid(row=row, column=0, columnspan=2, pady=(0, 10))
         ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
@@ -929,8 +1042,17 @@ class TempoFactureApp:
 
         from invoice import compute_duration_hours
         current_hours = compute_duration_hours(entry["start_time"], entry["end_time"])
+        # Liste tous les projets (y compris archives) : une entree existante
+        # peut porter sur un projet depuis archive, qui doit rester
+        # selectionnable (au moins pour le laisser tel quel) meme s'il
+        # n'apparait plus dans le combo du chronometre (voir
+        # _refresh_timer_project_choices, qui ne liste que les projets
+        # facturables).
+        projects = self.db.list_projects(include_archived=True)
+        project_choices = [(p["id"], f"{p['id']} - {p['name']}") for p in projects]
         result = self._prompt_time_entry_fields(
-            "Modifier l'entree de temps", f"{current_hours:.2f}", entry["description"]
+            "Modifier l'entree de temps", f"{current_hours:.2f}", entry["description"],
+            current_project_id=entry["project_id"], project_choices=project_choices,
         )
         if result is None:
             return
@@ -956,6 +1078,16 @@ class TempoFactureApp:
             start = end - timedelta(hours=hours)
             update_kwargs["start_time"] = start.isoformat()
             update_kwargs["end_time"] = end.isoformat()
+        # Meme logique que pour les heures ci-dessus : n'envoyer project_id
+        # que s'il a reellement change, pour ne jamais declencher a tort le
+        # garde-fou "entree deja facturee" de update_time_entry() sur une
+        # simple correction de description (bug trouve a l'audit, voir E3b
+        # : reassigner une entree de temps a un autre projet necessitait
+        # auparavant de la supprimer et de la ressaisir, aucun chemin GUI
+        # n'exposant ce champ pourtant deja supporte cote base).
+        new_project_id = result.get("project_id")
+        if new_project_id is not None and new_project_id != entry["project_id"]:
+            update_kwargs["project_id"] = new_project_id
         try:
             self.db.update_time_entry(entry_id, **update_kwargs)
         except ValueError as exc:
@@ -1040,12 +1172,14 @@ class TempoFactureApp:
 
         preview_columns = ("project", "hours", "rate", "amount")
         self.preview_tree = ttk.Treeview(frame, columns=preview_columns, show="headings", height=6)
-        for col, label, width in [
-            ("project", "Projet", 200), ("hours", "Heures non facturees", 150),
-            ("rate", "Taux", 100), ("amount", "Montant", 100),
-        ]:
-            self.preview_tree.heading(col, text=label)
-            self.preview_tree.column(col, width=width, anchor="w")
+        self._configure_tree_columns(
+            self.preview_tree,
+            [
+                ("project", "Projet", 200), ("hours", "Heures non facturees", 150),
+                ("rate", "Taux", 100), ("amount", "Montant", 100),
+            ],
+            growable_columns=("project",),
+        )
         self.preview_tree.pack(fill=X, padx=10, pady=(0, 10))
 
         ttk.Separator(frame).pack(fill=X, padx=10)
@@ -1060,12 +1194,14 @@ class TempoFactureApp:
 
         columns = ("id", "number", "client", "date", "total", "status")
         self.invoices_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
-        for col, label, width in [
-            ("id", "ID", 40), ("number", "Numero", 100), ("client", "Client", 160),
-            ("date", "Date", 110), ("total", "Total", 100), ("status", "Statut", 100),
-        ]:
-            self.invoices_tree.heading(col, text=label)
-            self.invoices_tree.column(col, width=width, anchor="w")
+        self._configure_tree_columns(
+            self.invoices_tree,
+            [
+                ("id", "ID", 40), ("number", "Numero", 100), ("client", "Client", 160),
+                ("date", "Date", 110), ("total", "Total", 100), ("status", "Statut", 100),
+            ],
+            growable_columns=("client",),
+        )
         self.invoices_tree.tag_configure("overdue", foreground="#c0392b")
         self.invoices_tree.pack(fill=BOTH, expand=True, padx=10, pady=10)
 
@@ -1170,7 +1306,7 @@ class TempoFactureApp:
         # on en reprogramme un seul, apres une courte pause dans la frappe.
         if self._invoice_search_after_id is not None:
             self.root.after_cancel(self._invoice_search_after_id)
-        self._invoice_search_after_id = self.root.after(INVOICE_SEARCH_DEBOUNCE_MS, self._run_debounced_invoice_refresh)
+        self._invoice_search_after_id = self.root.after(SEARCH_DEBOUNCE_MS, self._run_debounced_invoice_refresh)
 
     def _run_debounced_invoice_refresh(self):
         self._invoice_search_after_id = None
@@ -1235,6 +1371,62 @@ class TempoFactureApp:
                 format_amount(item.rate, self._currency()), format_amount(item.amount, self._currency()),
             ))
 
+    def _compute_due_date(self) -> str:
+        """Echeance par defaut (delai de paiement configure en Parametres,
+        ajoute a la date du jour) - factorise entre _generate_invoice et
+        _duplicate_invoice, qui dupliquaient auparavant integralement ce
+        meme bloc de code (meme lecture du parametre, meme commentaire) -
+        bug trouve a l'audit, voir L1. date.today() (heure LOCALE)
+        melangerait deux fuseaux differents avec list_overdue_invoices, qui
+        compare toujours a la date UTC du jour (voir db.py : "Toutes les
+        dates/heures sont stockees en UTC") - une facture pourrait alors
+        etre jugee en retard un jour trop tot ou trop tard selon le fuseau
+        de l'utilisateur (bug trouve a l'audit)."""
+        from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+        try:
+            payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
+        except ValueError:
+            payment_terms_days = 30
+        return (_datetime.now(_timezone.utc).date() + _timedelta(days=payment_terms_days)).isoformat()
+
+    def _write_invoice_pdf_or_rollback(self, invoice_id, invoice, client, line_items, tax_rate, output_path) -> bool:
+        """Genere le PDF d'une facture qui vient d'etre creee en base ; en
+        cas d'echec (quel qu'il soit, pas seulement OSError), annule la
+        facture (rollback complet) pour ne jamais laisser de facture
+        "fantome" sans PDF correspondant, avec des heures verrouillees pour
+        rien, et affiche un message d'erreur. Renvoie True si le PDF a bien
+        ete ecrit (l'appelant peut continuer normalement), False si la
+        facture a du etre annulee (l'appelant doit alors s'arreter la, sans
+        rien faire de plus). Factorise entre _generate_invoice et
+        _duplicate_invoice, qui dupliquaient auparavant integralement ce
+        meme bloc (bug trouve a l'audit, voir L1). On capture toute
+        exception plausible, pas seulement OSError, car
+        generate_invoice_pdf peut aussi lever d'autres types d'erreurs
+        (encodage, etc.) - bug trouve a l'audit : une devise contenant un
+        caractere hors Latin-1 (ex : "€") faisait planter la generation
+        avec une exception non OSError, laissant une facture fantome en
+        base sans rollback."""
+        try:
+            generate_invoice_pdf(
+                output_path=output_path,
+                invoice_number=invoice["invoice_number"],
+                issue_date=invoice["issue_date"][:10],
+                due_date=invoice["due_date"],
+                company_name=self.db.get_setting("company_name", "Mon entreprise"),
+                company_info=self.db.get_setting("company_info", ""),
+                client_name=client["name"],
+                client_address=client["address"],
+                line_items=line_items,
+                tax_rate=tax_rate,
+                notes=invoice["notes"],
+                currency=invoice["currency"],
+            )
+        except Exception as exc:
+            self.db.delete_invoice(invoice_id)
+            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
+            return False
+        return True
+
     def _generate_invoice(self):
         client_id = self._parse_id(self.invoice_client_var.get())
         if client_id is None:
@@ -1248,6 +1440,22 @@ class TempoFactureApp:
         if tax_rate < 0:
             messagebox.showwarning(APP_TITLE, "Le taux de TVA ne peut pas etre negatif.")
             return
+        if tax_rate > 100:
+            # Aucune borne superieure n'existait auparavant (contrairement
+            # au nombre d'heures manuelles, voir plus bas) : une simple
+            # erreur de frappe d'un zero en trop (ex. 200 au lieu de 20)
+            # produisait silencieusement une facture avec un montant de TVA
+            # absurde envoye tel quel au client (bug trouve a l'audit, voir
+            # A7). Meme pattern de confirmation que pour les heures > 24 :
+            # on n'empeche rien (un taux > 100% reste legal dans de rares
+            # cas), on demande juste de confirmer que ce n'est pas une
+            # faute de frappe.
+            if not messagebox.askyesno(
+                APP_TITLE,
+                f"Un taux de TVA de {tax_rate:g} % est inhabituel (superieur a 100 %).\n"
+                "Confirmez-vous que ce taux est correct ?",
+            ):
+                return
         entries = self.db.list_time_entries(client_id=client_id, uninvoiced_only=True)
         if not entries:
             messagebox.showinfo(APP_TITLE, "Aucune heure non facturee pour ce client.")
@@ -1269,18 +1477,7 @@ class TempoFactureApp:
         if not output_path:
             return
 
-        from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
-        try:
-            payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
-        except ValueError:
-            payment_terms_days = 30
-        # date.today() (heure locale) melangerait deux fuseaux differents
-        # avec list_overdue_invoices, qui compare toujours a la date UTC du
-        # jour (voir db.py : "Toutes les dates/heures sont stockees en
-        # UTC") - une facture pourrait alors etre jugee en retard un jour
-        # trop tot ou trop tard selon le fuseau de l'utilisateur (bug
-        # trouve a l'audit).
-        due_date = (_datetime.now(_timezone.utc).date() + _timedelta(days=payment_terms_days)).isoformat()
+        due_date = self._compute_due_date()
 
         try:
             invoice_id = self.db.create_invoice(
@@ -1292,35 +1489,9 @@ class TempoFactureApp:
             return
         invoice = self.db.get_invoice(invoice_id)
 
-        try:
-            generate_invoice_pdf(
-                output_path=Path(output_path),
-                invoice_number=invoice["invoice_number"],
-                issue_date=invoice["issue_date"][:10],
-                due_date=invoice["due_date"],
-                company_name=self.db.get_setting("company_name", "Mon entreprise"),
-                company_info=self.db.get_setting("company_info", ""),
-                client_name=client["name"],
-                client_address=client["address"],
-                line_items=line_items,
-                tax_rate=tax_rate,
-                notes=invoice["notes"],
-                currency=invoice["currency"],
-            )
-        except Exception as exc:
-            # Le PDF n'a pas pu etre genere ou ecrit (permission refusee,
-            # fichier ouvert ailleurs, disque plein, mais aussi n'importe
-            # quelle erreur de generation - ex : caractere non gerable par
-            # fpdf2) : on annule la facture pour ne jamais laisser une
-            # facture "fantome" sans PDF correspondant, avec des heures
-            # verrouillees pour rien. On capture toute exception plausible,
-            # pas seulement OSError, car generate_invoice_pdf peut aussi
-            # lever d'autres types d'erreurs (encodage, etc.) - bug trouve a
-            # l'audit : une devise contenant un caractere hors Latin-1 (ex :
-            # "€") faisait planter la generation avec une exception non
-            # OSError, laissant une facture fantome en base sans rollback.
-            self.db.delete_invoice(invoice_id)
-            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
+        if not self._write_invoice_pdf_or_rollback(
+            invoice_id, invoice, client, line_items, tax_rate, Path(output_path)
+        ):
             return
 
         # Efface les notes une fois la facture generee : un texte specifique
@@ -1432,18 +1603,7 @@ class TempoFactureApp:
         if not output_path:
             return
 
-        from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
-        try:
-            payment_terms_days = int(self.db.get_setting("payment_terms_days", "30") or 0)
-        except ValueError:
-            payment_terms_days = 30
-        # date.today() (heure locale) melangerait deux fuseaux differents
-        # avec list_overdue_invoices, qui compare toujours a la date UTC du
-        # jour (voir db.py : "Toutes les dates/heures sont stockees en
-        # UTC") - une facture pourrait alors etre jugee en retard un jour
-        # trop tot ou trop tard selon le fuseau de l'utilisateur (bug
-        # trouve a l'audit).
-        due_date = (_datetime.now(_timezone.utc).date() + _timedelta(days=payment_terms_days)).isoformat()
+        due_date = self._compute_due_date()
 
         try:
             new_invoice_id = self.db.create_invoice(
@@ -1456,27 +1616,9 @@ class TempoFactureApp:
             return
         new_invoice = self.db.get_invoice(new_invoice_id)
 
-        try:
-            generate_invoice_pdf(
-                output_path=Path(output_path),
-                invoice_number=new_invoice["invoice_number"],
-                issue_date=new_invoice["issue_date"][:10],
-                due_date=new_invoice["due_date"],
-                company_name=self.db.get_setting("company_name", "Mon entreprise"),
-                company_info=self.db.get_setting("company_info", ""),
-                client_name=client["name"],
-                client_address=client["address"],
-                line_items=line_items,
-                tax_rate=source_invoice["tax_rate"],
-                notes=new_invoice["notes"],
-                currency=new_invoice["currency"],
-            )
-        except Exception as exc:
-            # Meme garde-fou que dans _generate_invoice : toute exception de
-            # generation (pas seulement OSError) doit annuler la facture
-            # pour ne jamais laisser de facture fantome.
-            self.db.delete_invoice(new_invoice_id)
-            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
+        if not self._write_invoice_pdf_or_rollback(
+            new_invoice_id, new_invoice, client, line_items, source_invoice["tax_rate"], Path(output_path)
+        ):
             return
 
         self._refresh_invoices()
@@ -1546,6 +1688,18 @@ class TempoFactureApp:
         self.setting_idle_threshold_var = StringVar(
             value=self.db.get_setting("idle_threshold_minutes", str(IDLE_THRESHOLD_SECONDS // 60))
         )
+        # La verification de mise a jour au demarrage n'etait auparavant
+        # jamais desactivable (appelee inconditionnellement dans __init__)
+        # - la requete elle-meme est minimale et non intrusive (simple GET
+        # vers l'API publique GitHub Releases, aucune donnee personnelle ni
+        # identifiant machine, voir update_checker.py), mais cela nuancait
+        # legerement l'affirmation ci-dessous ("aucune connexion internet
+        # n'est necessaire") pour un utilisateur soucieux d'un fonctionnement
+        # strictement hors-ligne (bug trouve a l'audit, voir H1). Active par
+        # defaut pour ne pas changer le comportement existant.
+        self.setting_check_updates_var = BooleanVar(
+            value=self.db.get_setting("check_updates_on_startup", "1") == "1"
+        )
 
         ttk.Label(form, text="Nom de l'entreprise (affiche sur les factures)").grid(row=0, column=0, sticky="w", pady=5)
         self.settings_company_name_entry = ttk.Entry(form, textvariable=self.setting_company_name_var, width=50)
@@ -1562,7 +1716,11 @@ class TempoFactureApp:
         ttk.Label(form, text="Seuil d'inactivite du chronometre (minutes)").grid(row=4, column=0, sticky="w", pady=5)
         self.settings_idle_threshold_entry = ttk.Entry(form, textvariable=self.setting_idle_threshold_var, width=10)
         self.settings_idle_threshold_entry.grid(row=4, column=1, sticky="w", padx=5)
-        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=5, column=1, sticky="e", pady=10)
+        ttk.Checkbutton(
+            form, text="Verifier les mises a jour au demarrage (seule activite reseau de l'application)",
+            variable=self.setting_check_updates_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=6, column=1, sticky="e", pady=10)
         # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
         # a l'audit, voir E2).
         for entry in (
@@ -1651,6 +1809,12 @@ class TempoFactureApp:
         self.db.set_setting("payment_terms_days", str(payment_terms))
         self.db.set_setting("currency", currency)
         self.db.set_setting("idle_threshold_minutes", str(idle_threshold_minutes))
+        # Ne s'applique qu'au PROCHAIN demarrage (voir __init__, ou la
+        # verification est lancee juste apres l'ouverture de la base, avant
+        # meme la construction de cet onglet) : decocher ici n'annule pas
+        # une verification deja en cours dans ce processus, mais empeche la
+        # suivante (bug trouve a l'audit, voir H1).
+        self.db.set_setting("check_updates_on_startup", "1" if self.setting_check_updates_var.get() else "0")
         self._refresh_clients()
         self._refresh_projects()
         self._refresh_time_entries()

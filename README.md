@@ -69,6 +69,12 @@ clic à partir des heures non encore facturées.
 - **100 % local, zéro cloud** : toutes les données (clients, projets,
   temps, factures) sont stockées dans une base SQLite locale. Aucun compte,
   aucune connexion internet requise.
+- **Indicateur de mise à jour** : au démarrage, un petit indicateur en bas
+  de fenêtre signale si une nouvelle version est disponible (simple requête
+  vers l'API publique GitHub Releases, aucune donnée personnelle transmise)
+  et propose un lien direct vers la page de téléchargement. Peut être
+  désactivé à tout moment depuis l'onglet **Paramètres** pour un usage
+  strictement hors ligne.
 - **Gratuit et open source, pour toujours** : pas de version payante, pas
   de fonctionnalité verrouillée derrière un abonnement.
 
@@ -126,7 +132,9 @@ python -m pip install -r requirements.txt
    ce nom est aussi fourni dès la première installation.
 5. Onglet **Paramètres** : renseignez le nom et les informations de votre
    entreprise (affichés sur chaque facture générée), le délai de paiement
-   par défaut, la devise, et le seuil d'inactivité du chronomètre.
+   par défaut, la devise, et le seuil d'inactivité du chronomètre. Une case
+   à cocher permet aussi de désactiver la vérification de mise à jour au
+   démarrage (activée par défaut).
 
 ## Confidentialité
 
@@ -135,6 +143,11 @@ python -m pip install -r requirements.txt
 - La détection d'inactivité mesure uniquement une durée (via l'horloge
   système Windows) — elle n'enregistre jamais ce qui est tapé ou cliqué.
 - Les données sont stockées dans `%APPDATA%\TempoFacture\tempofacture.sqlite`.
+- Seule activité réseau de l'application : au démarrage, une requête GET
+  optionnelle vers l'API publique GitHub Releases pour signaler une
+  nouvelle version disponible (aucune donnée personnelle ni identifiant
+  machine transmis). Désactivable depuis l'onglet **Paramètres** pour un
+  usage strictement hors ligne.
 
 ## Sauvegarde et restauration
 
@@ -177,14 +190,18 @@ python -m unittest discover tests -v
 ```
 db.py                 # couche donnees SQLite : clients, projets, temps, factures
 invoice.py            # calcul des lignes de facture et generation du PDF (fpdf2)
+csv_export.py         # export CSV des heures et de l'historique des factures
 timer.py              # moteur de chronometre + detection d'inactivite (ctypes)
+update_checker.py     # verification de mise a jour via l'API GitHub Releases
 gui.py                # interface graphique Tkinter
 tests/                 # tests automatises
 requirements.txt      # dependances (fpdf2)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)
 Lancer.bat            # raccourci de lancement double-clic (avec console, pour debug)
 TempoFacture.spec     # configuration de build PyInstaller (.exe autonome)
+version_info.txt      # metadonnees de version Windows embarquees dans l'exe
 icon.ico              # icone de l'application et de l'executable
+fonts/                 # police Unicode embarquee dans les PDF (Noto Sans SC)
 .gitignore
 LICENSE               # licence MIT
 README.md

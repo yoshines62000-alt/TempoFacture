@@ -112,6 +112,36 @@ class DatabaseTestCase(unittest.TestCase):
         self.db.update_time_entry(entry_id, description="Note ajoutee apres coup")
         self.assertEqual(self.db.get_time_entry(entry_id)["description"], "Note ajoutee apres coup")
 
+    def test_update_time_entry_can_reassign_the_project_of_an_uninvoiced_entry(self):
+        # Voir E3b : le champ project_id est deja pleinement supporte cote
+        # base (whitelist "allowed" de update_time_entry), verrouille ici
+        # independamment du chemin GUI qui l'expose desormais (gui.py,
+        # _edit_time_entry).
+        client_id = self.db.add_client("Client")
+        original_project_id = self.db.add_project(client_id, "Projet original")
+        other_project_id = self.db.add_project(client_id, "Autre projet")
+        entry_id = self.db.add_manual_time_entry(
+            original_project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        self.db.update_time_entry(entry_id, project_id=other_project_id)
+        self.assertEqual(self.db.get_time_entry(entry_id)["project_id"], other_project_id)
+
+    def test_update_time_entry_rejects_project_reassignment_on_invoiced_entry(self):
+        # Meme garde-fou que pour start_time/end_time (voir
+        # test_update_time_entry_rejects_time_change_on_invoiced_entry) :
+        # reassigner le projet d'une entree deja facturee desynchroniserait
+        # ce qu'elle affiche de ce que la facture a reellement enregistre.
+        client_id = self.db.add_client("Client")
+        original_project_id = self.db.add_project(client_id, "Projet original")
+        other_project_id = self.db.add_project(client_id, "Autre projet")
+        entry_id = self.db.add_manual_time_entry(
+            original_project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        self.db.create_invoice(client_id, [entry_id])
+        with self.assertRaises(ValueError):
+            self.db.update_time_entry(entry_id, project_id=other_project_id)
+        self.assertEqual(self.db.get_time_entry(entry_id)["project_id"], original_project_id)
+
     def test_get_time_entry_returns_none_for_unknown_id(self):
         self.assertIsNone(self.db.get_time_entry(999))
 
@@ -763,6 +793,76 @@ class ProjectRefreshPerformanceTestCase(unittest.TestCase):
         # nouvelle strategie.
         self.assertLess(new_duration, old_duration / 5)
         self.assertLess(new_duration, 0.5)
+
+
+class ConnectionTimeoutTestCase(unittest.TestCase):
+    """Verrouille le correctif C9 : rien n'empechait auparavant de lancer
+    deux instances de l'application sur le meme fichier de donnees, et
+    sqlite3.connect() etait appele sans timeout= explicite (donc avec le
+    defaut Python de 5 secondes seulement) - un conflit d'ecriture entre
+    deux instances au-dela de ce delai levait un sqlite3.OperationalError
+    non necessairement bien tolere. Database.__init__ passe desormais un
+    timeout plus genereux."""
+
+    def test_connect_is_called_with_a_generous_explicit_timeout(self):
+        from unittest import mock
+
+        tmp = Path(tempfile.mkdtemp())
+        with mock.patch("db.sqlite3.connect", wraps=__import__("sqlite3").connect) as spy_connect:
+            db = Database(tmp / "test.sqlite")
+            self.addCleanup(db.close)
+
+        spy_connect.assert_called_once()
+        _, kwargs = spy_connect.call_args
+        self.assertIn("timeout", kwargs)
+        self.assertGreaterEqual(kwargs["timeout"], 30.0)
+
+    def test_a_second_instance_can_still_read_while_the_first_holds_a_lock_briefly(self):
+        # Reproduction realiste : une premiere connexion detient un verrou
+        # d'ecriture bref (transaction EXCLUSIVE), une seconde instance de
+        # Database sur le MEME fichier doit patienter puis reussir plutot
+        # que d'echouer immediatement au bout de 5 secondes seulement.
+        # L'ouverture de la seconde instance (bloquante tant que le verrou
+        # est detenu) se fait dans un thread separe, pendant que le thread
+        # principal - qui detient le verrou EXCLUSIVE - attend brievement
+        # puis le libere : un objet sqlite3.Connection ne peut etre utilise
+        # que depuis le thread qui l'a cree (check_same_thread par defaut),
+        # donc holder_conn doit rester manipule uniquement ici.
+        import sqlite3
+        import threading
+
+        tmp = Path(tempfile.mkdtemp())
+        db_path = tmp / "shared.sqlite"
+        primary = Database(db_path)
+        self.addCleanup(primary.close)
+        primary.add_client("Client existant")
+
+        holder_conn = sqlite3.connect(str(db_path), timeout=1.0)
+        holder_conn.execute("BEGIN EXCLUSIVE")
+        holder_conn.execute("SELECT 1")  # force l'acquisition reelle du verrou
+
+        result = {}
+
+        def open_second_instance():
+            try:
+                second = Database(db_path)  # doit patienter (timeout genereux), pas echouer immediatement
+                try:
+                    result["client_count"] = len(second.list_clients())
+                finally:
+                    second.close()
+            except Exception as exc:  # pragma: no cover - remonte via result pour un message d'echec clair
+                result["error"] = exc
+
+        opener = threading.Thread(target=open_second_instance)
+        opener.start()
+        time.sleep(0.5)  # laisse le second thread se heurter reellement au verrou avant de le liberer
+        holder_conn.commit()
+        holder_conn.close()
+        opener.join(timeout=10)
+
+        self.assertFalse(opener.is_alive(), "la seconde instance n'a jamais reussi a ouvrir la base")
+        self.assertNotIn("error", result, str(result.get("error")))
+        self.assertEqual(result.get("client_count"), 1)
 
 
 if __name__ == "__main__":

@@ -122,19 +122,51 @@ def format_amount(amount: float, currency: str = "EUR") -> str:
     return f"{formatted_number} {currency}"
 
 
+# Ponctuation tres courante dans un texte colle-copie depuis Word/le web
+# (tiret cadratin/demi-cadratin, guillemets et apostrophe courbes, puce,
+# trademark, points de suspension) : aucun de ces caracteres ne fait partie
+# du jeu Latin-1, donc _latin1_safe() les degradait auparavant en '?'
+# epars au milieu d'un texte par ailleurs lisible, meme pour un simple nom
+# d'entreprise ("Mon Entreprise ? Economie & Developpement?" au lieu de
+# "... — Economie & Developpement™") - un detail qui degradait l'aspect
+# professionnel du document (bug trouve a l'audit, voir B3). Applique une
+# equivalence Latin-1 lisible pour ces caracteres precis AVANT le
+# remplacement generique par '?' (qui reste le dernier recours pour tout
+# le reste, ex. ecritures non latines, emoji).
+_WORD_PUNCTUATION_SUBSTITUTIONS = {
+    "—": "-",     # tiret cadratin —
+    "–": "-",     # tiret demi-cadratin –
+    "“": '"',     # guillemet courbe ouvrant “
+    "”": '"',     # guillemet courbe fermant ”
+    "‘": "'",     # apostrophe/guillemet simple courbe ouvrant '
+    "’": "'",     # apostrophe/guillemet simple courbe fermant '
+    "•": "-",     # puce •
+    "™": "(TM)",  # trademark ™
+    "…": "...",   # points de suspension …
+}
+
+
 def _latin1_safe(text: str) -> str:
     """Remplace tout caractere non representable par la police de base
     (Latin-1) par '?' plutot que de laisser fpdf2 lever une exception. Les
     champs libres (nom d'entreprise, notes...) sont souvent copies-colles
     depuis Word/le web et peuvent contenir des tirets longs, guillemets
-    courbes ou emoji qui ne font pas partie de ce jeu de caracteres.
+    courbes ou emoji qui ne font pas partie de ce jeu de caracteres - la
+    ponctuation la plus frequente parmi ceux-ci est d'abord convertie vers
+    son equivalent Latin-1 lisible (voir _WORD_PUNCTUATION_SUBSTITUTIONS
+    ci-dessus, bug trouve a l'audit, voir B3) avant que le reste (emoji,
+    ecritures non latines...) ne soit degrade en '?' en dernier recours.
 
     N'est plus utilise qu'en dernier recours, quand la police Unicode
     embarquee (voir _register_unicode_font ci-dessous) est introuvable :
     dans le cas normal, generate_invoice_pdf() utilise _glyph_safe() a la
-    place, qui ne degrade que les tres rares caracteres vraiment absents de
-    cette police (au lieu d'effacer integralement tout texte hors
+    place, qui sait afficher nativement cette ponctuation aussi bien que
+    les ecritures non latines (Noto Sans SC couvre un sur-ensemble large de
+    Latin-1), et ne degrade que les tres rares caracteres vraiment absents
+    de cette police (au lieu d'effacer integralement tout texte hors
     Latin-1 - bug trouve a l'audit, voir B2)."""
+    for original, replacement in _WORD_PUNCTUATION_SUBSTITUTIONS.items():
+        text = text.replace(original, replacement)
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
