@@ -3,6 +3,7 @@ factures et parametres, tous relies a la meme base SQLite locale."""
 
 from __future__ import annotations
 
+import logging
 import queue
 import sys
 import webbrowser
@@ -23,6 +24,9 @@ RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
 IDLE_CHECK_INTERVAL_MS = 15_000
 INVOICE_SEARCH_DEBOUNCE_MS = 250  # attend une pause dans la frappe avant de rafraichir la liste des factures
+LOG_FILE_NAME = "tempofacture.log"
+
+_logger = logging.getLogger("tempofacture")
 
 
 def _resource_path(relative: str) -> Path:
@@ -35,6 +39,76 @@ def _data_dir() -> Path:
     return appdata
 
 
+def _log_path() -> Path:
+    return _data_dir() / "logs" / LOG_FILE_NAME
+
+
+def _configure_logging() -> Path:
+    """Journalise les erreurs dans un fichier du dossier de donnees de
+    l'app plutot que de les laisser filer sur stderr : l'executable
+    empaquete est construit avec console=False (voir TempoFacture.spec),
+    donc aucun terminal n'est attache et stderr n'est visible nulle part
+    pour l'utilisateur final. Sans ce fichier, un bug non prevu echouait
+    entierement en silence - aucune trace exploitable pour un rapport de
+    bug (bug trouve a l'audit, voir D1).
+
+    Contenu journalise : uniquement le type/message de l'exception et la
+    pile d'appels (fichiers, lignes, code source) telle que produite par
+    traceback.format_exception - jamais un contenu de la base de donnees.
+    Aucun message d'erreur "metier" de ce projet n'embarque de donnee
+    client/financiere (voir les `raise` de db.py/invoice.py/timer.py : tous
+    des messages fixes ou parametres par de simples identifiants/statuts,
+    jamais un nom, un email, une adresse ou un montant).
+    """
+    log_dir = _data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / LOG_FILE_NAME
+    _logger.setLevel(logging.INFO)
+    # Retire d'abord d'eventuels anciens handlers : cette fonction peut etre
+    # appelee plusieurs fois dans le meme processus (ex: plusieurs instances
+    # successives de TempoFactureApp dans les tests, chacune redirigeant
+    # _data_dir() vers un dossier temporaire different) - sans ce nettoyage,
+    # chaque appel ajouterait un handler de plus, dupliquant chaque ligne
+    # journalisee et gardant ouvert un fichier d'un ancien dossier obsolete.
+    for handler in list(_logger.handlers):
+        handler.close()
+        _logger.removeHandler(handler)
+    handler = logging.FileHandler(str(path), encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+    _logger.addHandler(handler)
+    _logger.propagate = False
+    return path
+
+
+def _handle_uncaught_exception(exc_type, exc_value, exc_tb) -> None:
+    """Gestionnaire d'exception Tk global (branche sur
+    root.report_callback_exception dans TempoFactureApp.__init__).
+
+    Par defaut, quand un callback Tkinter (clic de bouton, etc.) leve une
+    exception non geree, Tkinter se contente d'imprimer la trace sur stderr
+    puis CONTINUE l'execution sans rien signaler : l'utilisateur clique et
+    il ne se passe rigoureusement rien de visible, sans aucune trace
+    exploitable dans l'exe empaquete (console=False) (bug trouve a l'audit,
+    voir D1). Ce gestionnaire journalise systematiquement l'exception puis
+    informe clairement l'utilisateur, avec le chemin du fichier ou la trace
+    complete a ete enregistree."""
+    _logger.error("Exception non geree dans un callback Tk", exc_info=(exc_type, exc_value, exc_tb))
+    try:
+        messagebox.showerror(
+            APP_TITLE,
+            "Une erreur inattendue s'est produite et l'action demandee n'a "
+            "pas pu aboutir.\n\n"
+            f"Les details techniques ont ete enregistres dans :\n{_log_path()}\n\n"
+            "Vous pouvez joindre ce fichier a un rapport de bug.",
+        )
+    except Exception:
+        # L'important est que la journalisation ci-dessus ait deja eu lieu :
+        # un gestionnaire d'exceptions ne doit jamais lui-meme lever, ce qui
+        # remplacerait un echec silencieux par un plantage plus silencieux
+        # encore.
+        pass
+
+
 class TempoFactureApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -45,6 +119,13 @@ class TempoFactureApp:
         # winfo_reqheight() - bug trouve a l'audit). 760px laisse une marge
         # confortable au-dessus de ce minimum sur un ecran 1920x1080.
         self.root.geometry("980x760")
+
+        # Doit etre en place avant tout le reste : c'est ce qui garantit
+        # qu'une exception non prevue dans n'importe quel callback (clic de
+        # bouton, etc.) sera journalisee et signalee a l'utilisateur au lieu
+        # d'echouer silencieusement (voir D1 de l'audit).
+        _configure_logging()
+        self.root.report_callback_exception = _handle_uncaught_exception
 
         self.db = Database(_data_dir() / "tempofacture.sqlite")
         self.timer = Timer(self.db)

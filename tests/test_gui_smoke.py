@@ -289,6 +289,97 @@ class GuiSmokeTestCase(unittest.TestCase):
         min_width, min_height = self.root.wm_minsize()
         self.assertGreaterEqual(min_height, required_height)
 
+    # -- item audit D1 : gestionnaire d'exception Tk global + journalisation
+    # -- (aucun echec silencieux dans l'exe empaquete, console=False) -------
+
+    def test_uncaught_exception_in_a_tk_callback_is_logged_and_shown_to_the_user(self):
+        # Reproduit directement le point d'entree que Tkinter appelle
+        # lui-meme quand un callback (clic de bouton, etc.) leve une
+        # exception non geree : root.report_callback_exception. Le
+        # comportement par defaut de Tkinter est d'imprimer la trace sur
+        # stderr et de CONTINUER silencieusement - invisible dans l'exe
+        # empaquete (console=False, voir TempoFacture.spec) puisqu'aucun
+        # terminal n'y est attache.
+        try:
+            raise RuntimeError("panne simulee pour le test")
+        except RuntimeError:
+            exc_info = sys.exc_info()
+
+        with patch("tkinter.messagebox.showerror") as mock_error:
+            self.app.root.report_callback_exception(*exc_info)
+
+        # 1) L'utilisateur voit un message clair : pas d'echec silencieux.
+        mock_error.assert_called_once()
+        title, message = mock_error.call_args[0][:2]
+        self.assertEqual(title, gui.APP_TITLE)
+        self.assertIn("erreur inattendue", message.lower())
+
+        # 2) La trace complete a ete journalisee dans un fichier exploitable
+        # pour un rapport de bug, dans le dossier de donnees de l'app (ici
+        # redirige vers self.tmp par le patch de gui._data_dir en setUp).
+        log_path = self.tmp / "logs" / "tempofacture.log"
+        self.assertTrue(log_path.exists())
+        content = log_path.read_text(encoding="utf-8")
+        self.assertIn("RuntimeError", content)
+        self.assertIn("panne simulee pour le test", content)
+        # Le chemin communique a l'utilisateur pointe bien vers ce fichier.
+        self.assertIn(str(log_path), message)
+
+    def test_a_real_button_callback_raising_reaches_the_global_handler(self):
+        # Reproduit fidelement le scenario de l'audit (voir D1) : un clic
+        # sur un bouton dont le handler leve une exception non prevue ne
+        # doit plus se traduire par "je clique et il ne se passe rien" -
+        # verifie via un vrai widget Tkinter invoque de bout en bout (pas
+        # seulement un appel direct au gestionnaire ci-dessus).
+        def boom():
+            raise RuntimeError("boom bouton")
+
+        button = tkinter.ttk.Button(self.root, text="x", command=boom)
+        with patch("tkinter.messagebox.showerror") as mock_error:
+            button.invoke()
+            self.root.update()
+
+        self.assertTrue(self.root.winfo_exists())  # pas de plantage de la fenetre
+        mock_error.assert_called_once()
+        log_path = self.tmp / "logs" / "tempofacture.log"
+        self.assertIn("boom bouton", log_path.read_text(encoding="utf-8"))
+
+    def test_configure_logging_replaces_stale_handlers_instead_of_stacking(self):
+        # _configure_logging() est appelee a chaque creation de
+        # TempoFactureApp (une par test dans cette classe, chacune avec un
+        # _data_dir different) : si les handlers s'empilaient au lieu
+        # d'etre remplaces, une seule erreur finirait journalisee plusieurs
+        # fois, et un handler resterait ouvert sur le dossier temporaire
+        # (deja supprime) d'un test precedent.
+        gui._configure_logging()
+        gui._configure_logging()
+        self.assertEqual(len(gui._logger.handlers), 1)
+
+    def test_business_error_messages_never_embed_client_or_financial_data(self):
+        # Le contenu journalise inclut le message de l'exception : ce test
+        # verrouille le fait que les erreurs "metier" de ce projet ne
+        # contiennent jamais de donnee client/financiere (nom, email,
+        # adresse, montant) qui se retrouverait alors en clair dans le
+        # fichier de log - seulement des identifiants/statuts neutres.
+        client_id = self.app.db.add_client(
+            "Client Ultra Confidentiel", "secret@example.com", "1 rue Privee", 123.45
+        )
+        project_id = self.app.db.add_project(client_id, "Projet Secret")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00"
+        )
+        self.app.db.create_invoice(client_id, [entry_id])
+
+        with self.assertRaises(ValueError) as ctx:
+            self.app.db.delete_time_entry(entry_id)  # deja facturee
+
+        message = str(ctx.exception)
+        self.assertNotIn("Client Ultra Confidentiel", message)
+        self.assertNotIn("secret@example.com", message)
+        self.assertNotIn("1 rue Privee", message)
+        self.assertNotIn("123.45", message)
+        self.assertNotIn("Projet Secret", message)
+
 
 if __name__ == "__main__":
     unittest.main()
