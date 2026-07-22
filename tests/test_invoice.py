@@ -11,6 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from db import Database
 import invoice as inv
 
+try:
+    import fitz  # PyMuPDF : utilise uniquement pour extraire le texte REELLEMENT
+    # rendu dans le PDF genere (voir NonLatin1ClientNameTestCase), pour verrouiller
+    # que les caracteres non-Latin1 apparaissent lisiblement plutot que comme "?".
+except ImportError:
+    fitz = None
+
 
 class DurationTestCase(unittest.TestCase):
     def test_computes_hours_between_two_timestamps(self):
@@ -388,6 +395,77 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
                 drawn_width, width,
                 f"le texte '{drawn_text}' (largeur {drawn_width}mm) deborde de sa cellule ({width}mm)",
             )
+
+
+@unittest.skipUnless(fitz is not None, "PyMuPDF (pymupdf) n'est pas installe")
+class NonLatin1ClientNameTestCase(unittest.TestCase):
+    """Regression (audit Phase 5, B2) : un nom de client redige dans une
+    ecriture non latine (chinois, cyrillique...) etait entierement
+    remplace par une suite de '?' sur la facture PDF - la police de base
+    "Helvetica" de fpdf2 ne supporte que Latin-1 (voir l'ancien
+    _latin1_safe()). generate_invoice_pdf() embarque desormais une police
+    Unicode (Noto Sans SC, voir fonts/NotoSansSC-Regular.otf et
+    _register_unicode_font) pour tous les champs texte. Ces tests
+    extraient le texte REELLEMENT rendu dans le PDF (via PyMuPDF), pas
+    seulement l'absence de plantage (deja verrouille par
+    test_generates_pdf_with_non_latin1_characters_without_crashing
+    ci-dessus), pour verrouiller que le nom apparait bien lisiblement."""
+
+    @staticmethod
+    def _generate_and_extract_text(client_name: str) -> str:
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture.pdf"
+        items = [inv.LineItem("Projet A", hours=2.0, rate=50.0)]
+        inv.generate_invoice_pdf(
+            output_path=output_path,
+            invoice_number="2026-0010",
+            issue_date="2026-01-15",
+            due_date=None,
+            company_name="Mon Entreprise",
+            company_info="",
+            client_name=client_name,
+            client_address="",
+            line_items=items,
+            tax_rate=0.0,
+        )
+        doc = fitz.open(str(output_path))
+        try:
+            return "".join(page.get_text() for page in doc)
+        finally:
+            doc.close()
+
+    def test_cjk_client_name_renders_legibly_not_as_question_marks(self):
+        client_name = "北京科技有限公司"  # exemple utilise par l'audit
+        text = self._generate_and_extract_text(client_name)
+        self.assertIn(client_name, text)
+        self.assertNotIn("?" * len(client_name), text)
+
+    def test_cyrillic_client_name_renders_legibly_not_as_question_marks(self):
+        client_name = "ООО Ромашка"
+        text = self._generate_and_extract_text(client_name)
+        self.assertIn(client_name, text)
+        self.assertNotIn("???", text)
+
+    def test_falls_back_to_latin1_safe_when_the_font_file_is_missing(self):
+        # Filet de securite : si la ressource de police venait a manquer
+        # (ex. probleme d'empaquetage de l'executable), la generation ne
+        # doit jamais planter - elle se degrade vers l'ancien comportement
+        # Latin-1 (tout caractere hors Latin-1 remplace par '?'), plutot
+        # que d'empecher la facture d'etre emise.
+        from unittest import mock
+
+        with mock.patch.object(inv, "_resource_path", return_value=Path("chemin/inexistant.otf")):
+            text = self._generate_and_extract_text("北京科技有限公司")
+        self.assertNotIn("北京", text)
+        self.assertIn("?" * 8, text)
+
+    def test_a_character_absent_even_from_the_unicode_font_degrades_to_question_mark(self):
+        # Un emoji n'est couvert ni par Latin-1 ni par la police Unicode
+        # embarquee (Noto Sans SC ne vise pas les emoji) : doit degrader
+        # proprement en '?' (comme avant, voir _glyph_safe) plutot que de
+        # planter ou de rendre un glyphe "manquant" invisible et intracable.
+        text = self._generate_and_extract_text("Client \U0001F680")
+        self.assertIn("Client ?", text)
 
 
 class ReexportInvoicePdfTestCase(unittest.TestCase):

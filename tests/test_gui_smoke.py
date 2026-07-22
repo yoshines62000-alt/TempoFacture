@@ -593,6 +593,64 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.assertNotIn("123.45", message)
         self.assertNotIn("Projet Secret", message)
 
+    # -- item audit Phase 5, E1 : chronometre restaure au demarrage --------
+    # -- doit remplir les champs Projet/Description visibles, pas juste ----
+    # -- l'etat interne -------------------------------------------------------
+
+    def test_restoring_a_running_timer_fills_in_the_project_and_description_fields(self):
+        # Bug trouve a l'audit (E1) : _restore_running_timer() restaurait
+        # correctement l'etat interne du chronometre (timer.project_id,
+        # boutons Demarrer/Arreter, combo Projet verrouille) mais n'appelait
+        # jamais timer_project_var.set()/timer_description_var.set() -
+        # l'utilisateur voyait le temps defiler ("00:00:01"...) sans aucune
+        # indication visible de ce qui etait effectivement chronometre, sauf
+        # a aller consulter la ligne "(en cours)" du tableau plus bas.
+        client_id = self.app.db.add_client("Client Chrono")
+        project_id = self.app.db.add_project(client_id, "Refonte site vitrine")
+        self.app.db.start_time_entry(project_id, "Travail en cours (chronometre demarre)")
+        self.app._refresh_timer_project_choices()
+
+        # Simule l'etat "vide" observe juste apres l'ouverture de
+        # l'application, avant que _restore_running_timer() ne s'execute.
+        self.app.timer_project_var.set("")
+        self.app.timer_description_var.set("")
+
+        self.app._restore_running_timer()
+
+        self.assertEqual(self.app.timer_project_var.get(), f"{project_id} - Refonte site vitrine")
+        self.assertEqual(
+            self.app.timer_description_var.get(), "Travail en cours (chronometre demarre)"
+        )
+        # L'etat interne et les boutons restent corrects (non-regression).
+        self.assertEqual(self.app.timer.project_id, project_id)
+        self.assertEqual(str(self.app.timer_start_button["state"]), "disabled")
+        self.assertEqual(str(self.app.timer_stop_button["state"]), "normal")
+
+    def test_restoring_a_running_timer_with_no_description_leaves_the_field_empty(self):
+        # La description est optionnelle (chaine vide en base) : le
+        # correctif ne doit ni planter, ni laisser un texte residuel d'un
+        # etat precedent dans le champ.
+        client_id = self.app.db.add_client("Client Chrono")
+        project_id = self.app.db.add_project(client_id, "Projet sans description")
+        self.app.db.start_time_entry(project_id, "")
+        self.app._refresh_timer_project_choices()
+        self.app.timer_description_var.set("ancien texte residuel")
+
+        self.app._restore_running_timer()
+
+        self.assertEqual(self.app.timer_project_var.get(), f"{project_id} - Projet sans description")
+        self.assertEqual(self.app.timer_description_var.get(), "")
+
+    def test_no_running_timer_leaves_the_fields_untouched(self):
+        # Non-regression : quand aucun chronometre n'est en cours (cas
+        # courant), _restore_running_timer() doit continuer a ne rien faire.
+        self.app.timer_project_var.set("")
+        self.app.timer_description_var.set("valeur avant appel")
+
+        self.app._restore_running_timer()
+
+        self.assertEqual(self.app.timer_description_var.get(), "valeur avant appel")
+
 
 if __name__ == "__main__":
     unittest.main()

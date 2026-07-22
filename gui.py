@@ -742,6 +742,19 @@ class TempoFactureApp:
             return
         self.timer.active_entry_id = running["id"]
         self.timer.project_id = running["project_id"]
+        # Reflete l'etat reellement restaure dans les champs visibles : sans
+        # cela, l'utilisateur voyait le temps defiler et le bouton "Arreter"
+        # actif juste apres une fermeture/reouverture avec un chronometre en
+        # cours, mais les champs Projet et Description restaient vides (le
+        # combo Projet est verrouille juste en dessous, donc impossible de
+        # les re-saisir soi-meme) - aucune indication de ce qui est
+        # effectivement chronometre sans aller consulter la ligne "(en
+        # cours)" dans le tableau des entrees plus bas (bug trouve a
+        # l'audit, voir E1).
+        project = self.db.get_project(running["project_id"])
+        if project:
+            self.timer_project_var.set(f"{project['id']} - {project['name']}")
+        self.timer_description_var.set(running["description"] or "")
         import time as _time
         from datetime import datetime
         started = datetime.fromisoformat(running["start_time"])

@@ -1,0 +1,23 @@
+Police embarquee dans TempoFacture
+===================================
+
+Fichier : NotoSansSC-Regular.otf
+Police : Noto Sans SC (Adobe / Google), copyright 2014-2020 Adobe.
+Licence : SIL Open Font License, version 1.1 (OFL-1.1).
+Texte integral de la licence : https://scripts.sil.org/OFL
+
+La licence OFL autorise l'usage, l'etude, la modification et la
+redistribution libres de cette police, y compris embarquee dans un
+logiciel comme TempoFacture, a condition de ne pas la vendre seule et de
+conserver cette notice.
+
+Pourquoi cette police est necessaire : la police de base "Helvetica"
+utilisee par fpdf2 (bibliotheque de generation de PDF) ne supporte que le
+jeu de caracteres Latin-1, qui ne couvre ni les ideogrammes chinois/
+japonais/coreens, ni l'alphabet cyrillique, ni le grec. Sans police
+Unicode embarquee, tout nom de client redige dans une de ces ecritures
+etait entierement remplace par des "?" sur la facture PDF generee (voir
+CHANGELOG / audit). Noto Sans SC couvre le Latin (dont les caracteres
+accentues francais), le cyrillique, le grec et les ideogrammes CJK, ce qui
+resout ce probleme pour l'immense majorite des raisons sociales
+internationales.

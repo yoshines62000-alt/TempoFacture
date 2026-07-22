@@ -7,6 +7,7 @@ generate_invoice_pdf() touche a la mise en page/au rendu.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 _CENTS = Decimal("0.01")
+
+_UNICODE_FONT_FAMILY = "NotoSansSC"
+_UNICODE_FONT_FILE = "NotoSansSC-Regular.otf"
 
 
 def _round_money(value) -> float:
@@ -105,8 +109,66 @@ def _latin1_safe(text: str) -> str:
     (Latin-1) par '?' plutot que de laisser fpdf2 lever une exception. Les
     champs libres (nom d'entreprise, notes...) sont souvent copies-colles
     depuis Word/le web et peuvent contenir des tirets longs, guillemets
-    courbes ou emoji qui ne font pas partie de ce jeu de caracteres."""
+    courbes ou emoji qui ne font pas partie de ce jeu de caracteres.
+
+    N'est plus utilise qu'en dernier recours, quand la police Unicode
+    embarquee (voir _register_unicode_font ci-dessous) est introuvable :
+    dans le cas normal, generate_invoice_pdf() utilise _glyph_safe() a la
+    place, qui ne degrade que les tres rares caracteres vraiment absents de
+    cette police (au lieu d'effacer integralement tout texte hors
+    Latin-1 - bug trouve a l'audit, voir B2)."""
     return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _glyph_safe(text: str, cmap: dict) -> str:
+    """Remplace par '?' les seuls caracteres reellement absents du jeu de
+    glyphes de la police Unicode embarquee, au lieu de degrader tout texte
+    hors Latin-1 comme le faisait _latin1_safe() (bug trouve a l'audit, voir
+    B2 : un nom de client redige en chinois/japonais/coreen/cyrillique/grec
+    disparaissait entierement, remplace par une suite de '?', alors que la
+    police choisie (Noto Sans SC) sait parfaitement les afficher). cmap est
+    le dictionnaire {code_point: glyph_id} expose par fpdf2 pour la police
+    active (pdf.current_font.cmap) : ne couvre pas, par exemple, les emoji
+    ou certaines ecritures rares (arabe, thai, hebreu...), qui restent donc
+    degradees en '?' plutot que de faire planter la generation."""
+    return "".join(ch if ord(ch) in cmap else "?" for ch in text)
+
+
+def _resource_path(relative: str) -> Path:
+    """Chemin vers un fichier de ressource embarque (la police Unicode
+    ci-dessous), que l'app tourne depuis les sources ou depuis l'executable
+    PyInstaller (ou les ressources additionnelles declarees dans
+    TempoFacture.spec sont extraites dans un dossier temporaire expose par
+    sys._MEIPASS). Duplique gui._resource_path() : invoice.py reste
+    volontairement un module autonome, sans dependre de gui.py."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative
+
+
+def _register_unicode_font(pdf) -> Optional[dict]:
+    """Enregistre aupres de fpdf2 la police TrueType/OpenType Unicode
+    embarquee (Noto Sans SC, licence SIL Open Font License 1.1 - voir
+    fonts/NOTICE.txt) et renvoie son jeu de glyphes disponibles (cmap), pour
+    que generate_invoice_pdf() puisse l'utiliser a la place de la police de
+    base "Helvetica" (Latin-1 uniquement) sur tous les champs (entreprise,
+    client, projets, notes) - corrige a la racine la perte totale d'un nom
+    de client redige dans une ecriture non latine (bug trouve a l'audit,
+    voir B2).
+
+    Renvoie None si le fichier de police est introuvable ou invalide,
+    auquel cas generate_invoice_pdf() se rabat sur "Helvetica" et l'ancien
+    filet de securite _latin1_safe() : la generation d'une facture ne doit
+    jamais echouer a cause d'une ressource de police manquante."""
+    font_path = _resource_path(f"fonts/{_UNICODE_FONT_FILE}")
+    if not font_path.exists():
+        return None
+    try:
+        pdf.add_font(_UNICODE_FONT_FAMILY, style="", fname=str(font_path))
+        pdf.add_font(_UNICODE_FONT_FAMILY, style="B", fname=str(font_path))
+        pdf.set_font(_UNICODE_FONT_FAMILY, "", 10)
+        return dict(pdf.current_font.cmap)
+    except Exception:
+        return None
 
 
 def generate_invoice_pdf(
@@ -128,29 +190,46 @@ def generate_invoice_pdf(
     externe requis)."""
     from fpdf import FPDF
 
-    company_name = _latin1_safe(company_name)
-    company_info = _latin1_safe(company_info)
-    client_name = _latin1_safe(client_name)
-    client_address = _latin1_safe(client_address)
-    notes = _latin1_safe(notes)
-    invoice_number = _latin1_safe(invoice_number)
-    issue_date = _latin1_safe(issue_date)
-    due_date = _latin1_safe(due_date) if due_date else due_date
-    currency = _latin1_safe(currency)
-    line_items = [
-        LineItem(_latin1_safe(li.project_name), li.hours, li.rate) for li in line_items
-    ]
-
-    subtotal, tax_amount, total = compute_totals(line_items, tax_rate)
-
     pdf = FPDF(format="A4", unit="mm")
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
-    pdf.set_font("Helvetica", "B", 20)
+    # Police Unicode embarquee (voir _register_unicode_font) utilisee pour
+    # TOUS les champs, y compris les libelles fixes en francais ci-dessous :
+    # Noto Sans SC couvre une sur-ensemble strict de Latin-1 (y compris les
+    # caracteres accentues francais), donc l'unifier evite de melanger deux
+    # polices visuellement differentes sur le meme document. Se rabat sur
+    # "Helvetica" (et le filet de securite _latin1_safe) uniquement si le
+    # fichier de police est introuvable (bug trouve a l'audit, voir B2).
+    unicode_cmap = _register_unicode_font(pdf)
+    if unicode_cmap is not None:
+        font_family = _UNICODE_FONT_FAMILY
+
+        def _safe_text(text: str) -> str:
+            return _glyph_safe(text, unicode_cmap)
+    else:
+        font_family = "Helvetica"
+        _safe_text = _latin1_safe
+
+    company_name = _safe_text(company_name)
+    company_info = _safe_text(company_info)
+    client_name = _safe_text(client_name)
+    client_address = _safe_text(client_address)
+    notes = _safe_text(notes)
+    invoice_number = _safe_text(invoice_number)
+    issue_date = _safe_text(issue_date)
+    due_date = _safe_text(due_date) if due_date else due_date
+    currency = _safe_text(currency)
+    line_items = [
+        LineItem(_safe_text(li.project_name), li.hours, li.rate) for li in line_items
+    ]
+
+    subtotal, tax_amount, total = compute_totals(line_items, tax_rate)
+
+    pdf.set_font(font_family, "B", 20)
     pdf.cell(0, 12, "FACTURE", new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font(font_family, "", 10)
     pdf.set_text_color(90, 90, 90)
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(0, 5, company_name)
@@ -160,17 +239,17 @@ def generate_invoice_pdf(
     pdf.ln(4)
 
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_font(font_family, "B", 11)
     pdf.cell(0, 6, f"Facture no {invoice_number}", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font(font_family, "", 10)
     pdf.cell(0, 5, f"Date d'emission : {issue_date}", new_x="LMARGIN", new_y="NEXT")
     if due_date:
         pdf.cell(0, 5, f"Echeance : {due_date}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
-    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_font(font_family, "B", 10)
     pdf.cell(0, 5, "Facture a :", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font(font_family, "", 10)
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(0, 5, client_name)
     if client_address:
@@ -181,7 +260,7 @@ def generate_invoice_pdf(
     # Tableau des prestations
     col_widths = [90, 25, 30, 30]
     headers = ["Description", "Heures", "Taux horaire", "Montant"]
-    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_font(font_family, "B", 9)
     pdf.set_fill_color(235, 235, 235)
     for width, header in zip(col_widths, headers):
         pdf.cell(width, 7, header, border=1, fill=True)
@@ -201,7 +280,7 @@ def generate_invoice_pdf(
             truncated += "..."
         return truncated
 
-    pdf.set_font("Helvetica", "", 9)
+    pdf.set_font(font_family, "", 9)
     for item in line_items:
         # Un nom de projet trop long deborderait sur les colonnes suivantes
         # (cell() ne retourne pas a la ligne et n'empeche pas le
@@ -247,7 +326,7 @@ def generate_invoice_pdf(
     standard_amount_width = col_widths[3]
 
     def _text_width(text: str, style: str, size: float) -> float:
-        pdf.set_font("Helvetica", style, size)
+        pdf.set_font(font_family, style, size)
         return pdf.get_string_width(text)
 
     fits_standard_width = (
@@ -267,18 +346,18 @@ def generate_invoice_pdf(
         totals_label_width = longest_label_width + 6
         totals_amount_width = pdf.epw - totals_label_width
 
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font(font_family, "", 10)
     pdf.cell(totals_label_width, 6, "Sous-total", align="R")
     pdf.cell(totals_amount_width, 6, subtotal_text, align="R", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(totals_label_width, 6, tax_label, align="R")
     pdf.cell(totals_amount_width, 6, tax_text, align="R", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_font(font_family, "B", 11)
     pdf.cell(totals_label_width, 8, "Total", align="R")
     pdf.cell(totals_amount_width, 8, total_text, align="R", new_x="LMARGIN", new_y="NEXT")
 
     if notes:
         pdf.ln(8)
-        pdf.set_font("Helvetica", "", 9)
+        pdf.set_font(font_family, "", 9)
         pdf.set_text_color(90, 90, 90)
         pdf.set_x(pdf.l_margin)
         pdf.multi_cell(0, 5, notes)
