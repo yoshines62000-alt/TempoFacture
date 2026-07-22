@@ -139,6 +139,59 @@ class ComputeTotalsTestCase(unittest.TestCase):
         self.assertEqual(total, 990.0)
 
 
+class FormatAmountTestCase(unittest.TestCase):
+    """Regression (audit Phase 6, B7) : format_amount() convertissait deja
+    la virgule des milliers anglo-saxonne en espace, mais laissait le
+    point decimal tel quel - un melange incoherent des deux conventions a
+    la fois (ex : "12 345.67 EUR"), alors que l'integralite de
+    l'interface, le vocabulaire (TVA, SIRET) et le public cible (voir
+    README) sont francophones. La convention francaise attendue est une
+    espace insecable pour les milliers et une virgule pour la decimale."""
+
+    def test_uses_comma_as_the_decimal_separator(self):
+        self.assertEqual(inv.format_amount(40.0), "40,00 EUR")
+        self.assertEqual(inv.format_amount(3.13), "3,13 EUR")
+
+    def test_uses_a_non_breaking_space_as_the_thousands_separator(self):
+        # Espace INSECABLE ( ), pas une espace normale : evite qu'un
+        # total ne se retrouve coupe en deux lignes au milieu d'un nombre
+        # par un retour a la ligne automatique.
+        self.assertEqual(inv.format_amount(1234.5), "1 234,50 EUR")
+        self.assertEqual(inv.format_amount(1_234_567.89), "1 234 567,89 EUR")
+
+    def test_a_currency_code_containing_a_period_is_left_untouched(self):
+        # La devise est un champ 100% libre (voir Parametres/onglet
+        # Factures) qui peut lui-meme contenir un point (ex. "U.S.
+        # DOLLARS") : la conversion point -> virgule ne doit porter QUE sur
+        # la partie numerique, jamais sur le code devise accole.
+        self.assertEqual(inv.format_amount(10.0, "U.S. DOLLARS"), "10,00 U.S. DOLLARS")
+
+    def test_default_currency_is_still_eur(self):
+        self.assertEqual(inv.format_amount(0.0), "0,00 EUR")
+
+
+class FormatDateFrTestCase(unittest.TestCase):
+    """Regression (audit Phase 6, B6) : les dates imprimees sur la facture
+    ("Date d'emission : 2026-07-22") utilisaient le format ISO 8601 brut
+    (AAAA-MM-JJ, ideal pour le stockage - voir db.py) au lieu du format
+    usuel francais JJ/MM/AAAA, inhabituel sur un document remis a un
+    client francais."""
+
+    def test_converts_iso_date_to_french_dd_mm_yyyy(self):
+        self.assertEqual(inv._format_date_fr("2026-07-22"), "22/07/2026")
+        self.assertEqual(inv._format_date_fr("2026-01-05"), "05/01/2026")
+
+    def test_a_datetime_with_time_component_is_truncated_to_the_date(self):
+        self.assertEqual(inv._format_date_fr("2026-07-22T00:00:00+00:00"), "22/07/2026")
+
+    def test_falls_back_to_the_original_string_when_unparsable(self):
+        # Filet de securite : une date corrompue/mal importee ne doit
+        # jamais faire planter toute la generation de la facture pour un
+        # simple probleme d'affichage.
+        self.assertEqual(inv._format_date_fr("pas-une-date"), "pas-une-date")
+        self.assertEqual(inv._format_date_fr(""), "")
+
+
 class GenerateInvoicePdfTestCase(unittest.TestCase):
     def test_generates_a_readable_pdf_file(self):
         tmp = Path(tempfile.mkdtemp())
@@ -395,6 +448,142 @@ class GenerateInvoicePdfTestCase(unittest.TestCase):
                 drawn_width, width,
                 f"le texte '{drawn_text}' (largeur {drawn_width}mm) deborde de sa cellule ({width}mm)",
             )
+
+    def test_prints_dates_in_french_dd_mm_yyyy_format_not_raw_iso(self):
+        # Regression (audit Phase 6, B6) : verrouille le texte REELLEMENT
+        # dessine dans le PDF (pas seulement _format_date_fr() en
+        # isolation, voir FormatDateFrTestCase ci-dessus) : "Date
+        # d'emission : 22/07/2026" / "Echeance : 21/08/2026", jamais le
+        # format ISO brut ("2026-07-22").
+        from fpdf import FPDF
+        from unittest import mock
+
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_dates_fr.pdf"
+        items = [inv.LineItem("Projet A", hours=1.0, rate=50.0)]
+
+        recorded_texts = []
+        original_cell = FPDF.cell
+
+        def spying_cell(self, w=0, h=0, text="", *args, **kwargs):
+            recorded_texts.append(text)
+            return original_cell(self, w, h, text, *args, **kwargs)
+
+        with mock.patch.object(FPDF, "cell", spying_cell):
+            inv.generate_invoice_pdf(
+                output_path=output_path,
+                invoice_number="2026-0007",
+                issue_date="2026-07-22",
+                due_date="2026-08-21",
+                company_name="Ma societe",
+                company_info="",
+                client_name="Client",
+                client_address="",
+                line_items=items,
+                tax_rate=0.0,
+            )
+
+        self.assertIn("Date d'emission : 22/07/2026", recorded_texts)
+        self.assertIn("Echeance : 21/08/2026", recorded_texts)
+        self.assertNotIn("Date d'emission : 2026-07-22", recorded_texts)
+        self.assertNotIn("Echeance : 2026-08-21", recorded_texts)
+
+    def test_prints_amounts_with_french_comma_decimal_separator(self):
+        # Regression (audit Phase 6, B7) : verrouille le texte REELLEMENT
+        # dessine dans le PDF pour les montants (lignes d'articles ET bloc
+        # de totaux) : virgule decimale et espace insecable pour les
+        # milliers, jamais le point decimal anglo-saxon d'origine.
+        from fpdf import FPDF
+        from unittest import mock
+
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_montants_fr.pdf"
+        items = [inv.LineItem("Projet A", hours=20.0, rate=100.0)]  # sous-total 2000
+
+        recorded_texts = []
+        original_cell = FPDF.cell
+
+        def spying_cell(self, w=0, h=0, text="", *args, **kwargs):
+            recorded_texts.append(text)
+            return original_cell(self, w, h, text, *args, **kwargs)
+
+        with mock.patch.object(FPDF, "cell", spying_cell):
+            inv.generate_invoice_pdf(
+                output_path=output_path,
+                invoice_number="2026-0008",
+                issue_date="2026-01-15",
+                due_date=None,
+                company_name="Ma societe",
+                company_info="",
+                client_name="Client",
+                client_address="",
+                line_items=items,
+                tax_rate=20.0,
+            )
+
+        self.assertIn("2 000,00 EUR", recorded_texts)  # sous-total
+        self.assertIn("2 400,00 EUR", recorded_texts)  # total (20 x 100 x 1,2)
+        self.assertFalse(
+            any("2,000.00" in text or "2000.00" in text for text in recorded_texts),
+            "un montant a ete imprime avec le point decimal anglo-saxon au lieu de la virgule",
+        )
+
+    def test_repeats_the_table_header_on_every_page_of_a_multi_page_invoice(self):
+        # Regression (audit Phase 6, B4) : l'en-tete du tableau
+        # (Description/Heures/Taux horaire/Montant, fond grise) n'etait
+        # dessine qu'une seule fois avant la boucle d'ecriture des lignes -
+        # reproduction de l'audit avec 60 lignes (2 pages) : la page 2
+        # commencait directement par "Tache recurrente #29" sans aucun
+        # rappel des colonnes. On intercepte les appels reels a
+        # FPDF.cell() pour verifier que la cellule d'en-tete "Description"
+        # (fill=True, largeur de la 1ere colonne) est bien redessinee sur
+        # CHACUNE des pages produites, pas seulement la premiere.
+        from fpdf import FPDF
+        from unittest import mock
+
+        tmp = Path(tempfile.mkdtemp())
+        output_path = tmp / "facture_multi_pages.pdf"
+        items = [inv.LineItem(f"Tache recurrente #{i}", hours=1.0, rate=50.0) for i in range(60)]
+
+        recorded = []
+        original_cell = FPDF.cell
+
+        def spying_cell(self, w=0, h=0, text="", *args, **kwargs):
+            recorded.append((w, text, bool(kwargs.get("fill")), self.page_no()))
+            return original_cell(self, w, h, text, *args, **kwargs)
+
+        with mock.patch.object(FPDF, "cell", spying_cell):
+            inv.generate_invoice_pdf(
+                output_path=output_path,
+                invoice_number="2026-0009",
+                issue_date="2026-01-15",
+                due_date=None,
+                company_name="Ma societe",
+                company_info="",
+                client_name="Client",
+                client_address="",
+                line_items=items,
+                tax_rate=20.0,
+            )
+
+        self.assertTrue(output_path.exists())
+        header_pages = {
+            page for (w, text, fill, page) in recorded
+            if text == "Description" and fill and w == 90
+        }
+        self.assertGreaterEqual(
+            len(header_pages), 2,
+            "le scenario doit produire au moins 2 pages pour etre pertinent au correctif",
+        )
+        self.assertIn(1, header_pages, "en-tete absent de la page 1")
+        self.assertIn(2, header_pages, "en-tete absent de la page 2 (bug d'origine, voir B4)")
+
+        # Non-regression : les lignes elles-memes restent bien reparties
+        # sur les 2 pages (pas de doublon/perte de ligne cause par le
+        # saut de page manuel).
+        row_labels = {text for (w, text, fill, _page) in recorded if w == 90 and not fill}
+        for i in range(60):
+            self.assertIn(f"Tache recurrente #{i}", row_labels)
 
 
 @unittest.skipUnless(fitz is not None, "PyMuPDF (pymupdf) n'est pas installe")

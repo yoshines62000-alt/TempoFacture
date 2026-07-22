@@ -235,17 +235,28 @@ class TempoFactureApp:
         self.client_rate_var = StringVar(value="0")
 
         ttk.Label(form, text="Nom").grid(row=0, column=0, sticky="w")
-        ttk.Entry(form, textvariable=self.client_name_var, width=30).grid(row=0, column=1, padx=5)
+        self.client_name_entry = ttk.Entry(form, textvariable=self.client_name_var, width=30)
+        self.client_name_entry.grid(row=0, column=1, padx=5)
         ttk.Label(form, text="Email").grid(row=0, column=2, sticky="w")
-        ttk.Entry(form, textvariable=self.client_email_var, width=25).grid(row=0, column=3, padx=5)
+        self.client_email_entry = ttk.Entry(form, textvariable=self.client_email_var, width=25)
+        self.client_email_entry.grid(row=0, column=3, padx=5)
         ttk.Label(form, text="Taux horaire").grid(row=0, column=4, sticky="w")
-        ttk.Entry(form, textvariable=self.client_rate_var, width=8).grid(row=0, column=5, padx=5)
+        self.client_rate_entry = ttk.Entry(form, textvariable=self.client_rate_var, width=8)
+        self.client_rate_entry.grid(row=0, column=5, padx=5)
 
         ttk.Label(form, text="Adresse").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(form, textvariable=self.client_address_var, width=60).grid(
+        self.client_address_entry = ttk.Entry(form, textvariable=self.client_address_var, width=60)
+        self.client_address_entry.grid(
             row=1, column=1, columnspan=4, sticky="we", pady=(5, 0)
         )
         ttk.Button(form, text="Ajouter le client", command=self._add_client).grid(row=1, column=5, pady=(5, 0))
+        # Valider le formulaire au clavier (touche Entree) plutot que de
+        # forcer un clic souris sur "Ajouter le client" : l'usage courant de
+        # l'app implique des saisies frequentes et rapides, et aucun
+        # formulaire de l'application ne se soumettait au clavier avant ce
+        # correctif (bug trouve a l'audit, voir E2).
+        for entry in (self.client_name_entry, self.client_email_entry, self.client_rate_entry, self.client_address_entry):
+            entry.bind("<Return>", lambda event: self._add_client())
 
         search_row = ttk.Frame(frame)
         search_row.pack(fill=X, padx=10, pady=(0, 5))
@@ -296,12 +307,18 @@ class TempoFactureApp:
     def _refresh_clients(self):
         self.clients_tree.delete(*self.clients_tree.get_children())
         query = self.client_search_var.get().strip().lower() if hasattr(self, "client_search_var") else ""
+        # self._currency() interroge la table "settings" (voir _currency()
+        # ci-dessous) : hissee hors de la boucle pour n'etre appelee qu'une
+        # seule fois au lieu d'une fois par client affiche - meme anti-
+        # pattern (accessoire du N+1 deja corrige, voir C1) que celui deja
+        # traite dans _refresh_projects() (bug trouve a l'audit, voir C2).
+        currency = self._currency()
         for client in self.db.list_clients(include_archived=True):
             if query and query not in client["name"].lower() and query not in client["email"].lower():
                 continue
             self.clients_tree.insert("", END, iid=str(client["id"]), values=(
                 client["id"], client["name"], client["email"],
-                format_amount(client["hourly_rate"], self._currency()), "Oui" if client["archived"] else "Non",
+                format_amount(client["hourly_rate"], currency), "Oui" if client["archived"] else "Non",
             ))
 
     def _toggle_client_archived(self):
@@ -385,6 +402,16 @@ class TempoFactureApp:
         ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
+        # Entree valide le dialogue (equivalent clavier de "Enregistrer"),
+        # Echap l'annule (equivalent clavier de "Annuler") - lie sur le
+        # Toplevel lui-meme plutot que sur chaque champ individuellement :
+        # un evenement clavier non consomme par le widget avec le focus
+        # (aucune des Entry ci-dessus ne lie <Return>/<Escape>) remonte
+        # naturellement jusqu'au binding du Toplevel qui les contient (bug
+        # trouve a l'audit, voir E2).
+        dialog.bind("<Return>", lambda event: on_ok())
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+
         dialog.wait_window()
         return result or None
 
@@ -445,10 +472,16 @@ class TempoFactureApp:
         self.project_client_combo = ttk.Combobox(form, textvariable=self.project_client_var, width=25, state="readonly")
         self.project_client_combo.grid(row=0, column=1, padx=5)
         ttk.Label(form, text="Nom du projet").grid(row=0, column=2, sticky="w")
-        ttk.Entry(form, textvariable=self.project_name_var, width=25).grid(row=0, column=3, padx=5)
+        self.project_name_entry = ttk.Entry(form, textvariable=self.project_name_var, width=25)
+        self.project_name_entry.grid(row=0, column=3, padx=5)
         ttk.Label(form, text="Taux (optionnel)").grid(row=0, column=4, sticky="w")
-        ttk.Entry(form, textvariable=self.project_rate_var, width=10).grid(row=0, column=5, padx=5)
+        self.project_rate_entry = ttk.Entry(form, textvariable=self.project_rate_var, width=10)
+        self.project_rate_entry.grid(row=0, column=5, padx=5)
         ttk.Button(form, text="Ajouter le projet", command=self._add_project).grid(row=0, column=6, padx=5)
+        # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
+        # a l'audit, voir E2) : soumission du formulaire au clavier.
+        for entry in (self.project_name_entry, self.project_rate_entry):
+            entry.bind("<Return>", lambda event: self._add_project())
 
         search_row = ttk.Frame(frame)
         search_row.pack(fill=X, padx=10, pady=(0, 5))
@@ -577,6 +610,11 @@ class TempoFactureApp:
         ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
+        # Voir le commentaire equivalent dans _prompt_client_fields (bug
+        # trouve a l'audit, voir E2).
+        dialog.bind("<Return>", lambda event: on_ok())
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+
         dialog.wait_window()
         return result or None
 
@@ -652,10 +690,16 @@ class TempoFactureApp:
         self.manual_date_var = StringVar(value=_date.today().isoformat())
         self.manual_hours_var = StringVar()
         ttk.Label(manual, text="Date de fin (AAAA-MM-JJ)").pack(side=LEFT, padx=5, pady=8)
-        ttk.Entry(manual, textvariable=self.manual_date_var, width=12).pack(side=LEFT, padx=5)
+        self.manual_date_entry = ttk.Entry(manual, textvariable=self.manual_date_var, width=12)
+        self.manual_date_entry.pack(side=LEFT, padx=5)
         ttk.Label(manual, text="Nombre d'heures").pack(side=LEFT, padx=(10, 5))
-        ttk.Entry(manual, textvariable=self.manual_hours_var, width=8).pack(side=LEFT, padx=5)
+        self.manual_hours_entry = ttk.Entry(manual, textvariable=self.manual_hours_var, width=8)
+        self.manual_hours_entry.pack(side=LEFT, padx=5)
         ttk.Button(manual, text="Ajouter au projet selectionne", command=self._add_manual_entry).pack(side=LEFT, padx=10)
+        # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
+        # a l'audit, voir E2).
+        for entry in (self.manual_date_entry, self.manual_hours_entry):
+            entry.bind("<Return>", lambda event: self._add_manual_entry())
 
         columns = ("id", "project", "start", "end", "hours", "description")
         self.entries_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
@@ -863,6 +907,11 @@ class TempoFactureApp:
         ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
+        # Voir le commentaire equivalent dans _prompt_client_fields (bug
+        # trouve a l'audit, voir E2) : Entree valide, Echap annule.
+        dialog.bind("<Return>", lambda event: on_ok())
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+
         dialog.wait_window()
         return result or None
 
@@ -946,8 +995,13 @@ class TempoFactureApp:
         self.invoice_client_combo.pack(side=LEFT, padx=5)
         self.invoice_client_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_uninvoiced_preview())
         ttk.Label(top, text="TVA (%)").pack(side=LEFT, padx=(10, 0))
-        ttk.Entry(top, textvariable=self.invoice_tax_var, width=6).pack(side=LEFT, padx=5)
+        self.invoice_tax_entry = ttk.Entry(top, textvariable=self.invoice_tax_var, width=6)
+        self.invoice_tax_entry.pack(side=LEFT, padx=5)
         ttk.Button(top, text="Generer la facture (PDF)", command=self._generate_invoice).pack(side=LEFT, padx=10)
+        # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
+        # a l'audit, voir E2) : Entree dans le champ TVA declenche la meme
+        # action que le bouton "Generer la facture (PDF)".
+        self.invoice_tax_entry.bind("<Return>", lambda event: self._generate_invoice())
 
         # Rappel contextuel de la mention legale de franchise en base de
         # TVA (art. 293 B du CGI) : le champ TVA est preinitialise a "0",
@@ -973,7 +1027,9 @@ class TempoFactureApp:
         notes_row.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Label(notes_row, text="Notes (imprimees sur la facture)").pack(side=LEFT)
         self.invoice_notes_var = StringVar()
-        ttk.Entry(notes_row, textvariable=self.invoice_notes_var, width=45).pack(side=LEFT, padx=5)
+        self.invoice_notes_entry = ttk.Entry(notes_row, textvariable=self.invoice_notes_var, width=45)
+        self.invoice_notes_entry.pack(side=LEFT, padx=5)
+        self.invoice_notes_entry.bind("<Return>", lambda event: self._generate_invoice())
         self.note_template_var = StringVar()
         self.note_template_combo = ttk.Combobox(notes_row, textvariable=self.note_template_var, width=20, state="readonly")
         self.note_template_combo.pack(side=LEFT, padx=(10, 5))
@@ -1492,16 +1548,28 @@ class TempoFactureApp:
         )
 
         ttk.Label(form, text="Nom de l'entreprise (affiche sur les factures)").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Entry(form, textvariable=self.setting_company_name_var, width=50).grid(row=0, column=1, padx=5)
+        self.settings_company_name_entry = ttk.Entry(form, textvariable=self.setting_company_name_var, width=50)
+        self.settings_company_name_entry.grid(row=0, column=1, padx=5)
         ttk.Label(form, text="Informations (SIRET, adresse...)").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(form, textvariable=self.setting_company_info_var, width=50).grid(row=1, column=1, padx=5)
+        self.settings_company_info_entry = ttk.Entry(form, textvariable=self.setting_company_info_var, width=50)
+        self.settings_company_info_entry.grid(row=1, column=1, padx=5)
         ttk.Label(form, text="Delai de paiement par defaut (jours)").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(form, textvariable=self.setting_payment_terms_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
+        self.settings_payment_terms_entry = ttk.Entry(form, textvariable=self.setting_payment_terms_var, width=10)
+        self.settings_payment_terms_entry.grid(row=2, column=1, sticky="w", padx=5)
         ttk.Label(form, text="Devise (code, ex: EUR, USD, CHF)").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(form, textvariable=self.setting_currency_var, width=10).grid(row=3, column=1, sticky="w", padx=5)
+        self.settings_currency_entry = ttk.Entry(form, textvariable=self.setting_currency_var, width=10)
+        self.settings_currency_entry.grid(row=3, column=1, sticky="w", padx=5)
         ttk.Label(form, text="Seuil d'inactivite du chronometre (minutes)").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(form, textvariable=self.setting_idle_threshold_var, width=10).grid(row=4, column=1, sticky="w", padx=5)
+        self.settings_idle_threshold_entry = ttk.Entry(form, textvariable=self.setting_idle_threshold_var, width=10)
+        self.settings_idle_threshold_entry.grid(row=4, column=1, sticky="w", padx=5)
         ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=5, column=1, sticky="e", pady=10)
+        # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
+        # a l'audit, voir E2).
+        for entry in (
+            self.settings_company_name_entry, self.settings_company_info_entry, self.settings_payment_terms_entry,
+            self.settings_currency_entry, self.settings_idle_threshold_entry,
+        ):
+            entry.bind("<Return>", lambda event: self._save_settings())
 
         ttk.Label(
             frame,

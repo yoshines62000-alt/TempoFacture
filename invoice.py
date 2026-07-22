@@ -101,7 +101,25 @@ def format_amount(amount: float, currency: str = "EUR") -> str:
     # jeu de caracteres Latin-1, qui ne contient pas le signe euro. Plus
     # simple et plus robuste qu'embarquer une police Unicode pour ce seul
     # symbole.
-    return f"{amount:,.2f} {currency}".replace(",", " ")
+    #
+    # Separateurs a la convention francaise (espace insecable pour les
+    # milliers, virgule pour la decimale) plutot que le point decimal
+    # anglo-saxon d'origine : l'integralite de l'interface, le vocabulaire
+    # (TVA, SIRET) et le public cible (voir README) sont francophones, mais
+    # le point decimal restait affiche tel quel alors que la virgule des
+    # milliers avait deja ete convertie en espace - un melange incoherent
+    # des deux conventions a la fois (bug trouve a l'audit, voir B7). Une
+    # espace INSECABLE (pas une espace normale) est utilisee pour les
+    # milliers afin qu'un total ne se retrouve jamais coupe en deux lignes
+    # au milieu d'un nombre par un retour a la ligne automatique.
+    #
+    # La conversion virgule/point ne porte que sur la partie NUMERIQUE,
+    # avant d'accoler le code devise : celui-ci est un champ 100% libre
+    # (voir Parametres) qui peut lui-meme contenir un point (ex. "U.S.
+    # DOLLARS") - un tel point ne doit jamais etre altere par cette
+    # conversion.
+    formatted_number = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+    return f"{formatted_number} {currency}"
 
 
 def _latin1_safe(text: str) -> str:
@@ -143,6 +161,27 @@ def _resource_path(relative: str) -> Path:
     volontairement un module autonome, sans dependre de gui.py."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / relative
+
+
+def _format_date_fr(iso_date: str) -> str:
+    """Convertit une date de stockage au format ISO 8601 (AAAA-MM-JJ - voir
+    les commentaires de db.py qui justifient ce choix cote base : non
+    ambigu, trie naturellement) vers le format usuel francais JJ/MM/AAAA,
+    uniquement pour l'IMPRESSION sur la facture. L'integralite de
+    l'interface, le vocabulaire (TVA, SIRET) et le public cible (voir
+    README) sont francophones ; le format ISO brut ("Date d'emission :
+    2026-07-22"), bien qu'ideal en interne, est inhabituel sur un document
+    remis a un client francais (bug trouve a l'audit, voir B6). Ne touche
+    jamais au stockage : seule la chaine imprimee sur le PDF change.
+
+    Si la valeur ne correspond pas au format ISO attendu (donnee
+    corrompue, ancien format...), on l'affiche telle quelle plutot que de
+    faire echouer toute la generation de la facture pour un simple
+    probleme d'affichage de date."""
+    try:
+        return datetime.strptime(iso_date[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return iso_date
 
 
 def _register_unicode_font(pdf) -> Optional[dict]:
@@ -242,9 +281,9 @@ def generate_invoice_pdf(
     pdf.set_font(font_family, "B", 11)
     pdf.cell(0, 6, f"Facture no {invoice_number}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font(font_family, "", 10)
-    pdf.cell(0, 5, f"Date d'emission : {issue_date}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, f"Date d'emission : {_format_date_fr(issue_date)}", new_x="LMARGIN", new_y="NEXT")
     if due_date:
-        pdf.cell(0, 5, f"Echeance : {due_date}", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 5, f"Echeance : {_format_date_fr(due_date)}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     pdf.set_font(font_family, "B", 10)
@@ -260,11 +299,17 @@ def generate_invoice_pdf(
     # Tableau des prestations
     col_widths = [90, 25, 30, 30]
     headers = ["Description", "Heures", "Taux horaire", "Montant"]
-    pdf.set_font(font_family, "B", 9)
-    pdf.set_fill_color(235, 235, 235)
-    for width, header in zip(col_widths, headers):
-        pdf.cell(width, 7, header, border=1, fill=True)
-    pdf.ln()
+    row_height = 7
+
+    def _draw_table_header():
+        pdf.set_font(font_family, "B", 9)
+        pdf.set_fill_color(235, 235, 235)
+        for width, header in zip(col_widths, headers):
+            pdf.cell(width, row_height, header, border=1, fill=True)
+        pdf.ln()
+        pdf.set_font(font_family, "", 9)
+
+    _draw_table_header()
 
     def _truncate_to_width(text: str, width: float) -> str:
         # Meme logique que pour la colonne Description : si le texte
@@ -282,6 +327,22 @@ def generate_invoice_pdf(
 
     pdf.set_font(font_family, "", 9)
     for item in line_items:
+        # Une facture avec de nombreuses lignes (nombreux projets/entrees)
+        # peut deborder sur une page suivante (pagination automatique, voir
+        # set_auto_page_break ci-dessus) : sans ce garde-fou, l'en-tete du
+        # tableau (Description/Heures/Taux horaire/Montant) n'etait dessine
+        # qu'une seule fois avant la boucle, donc absent de la page 2+ - un
+        # client relisant une longue facture devait revenir a la page 1
+        # pour se rappeler quelle colonne represente quoi (bug trouve a
+        # l'audit, voir B4). will_page_break() indique par avance si la
+        # prochaine cellule declencherait un saut de page (sans le
+        # declencher lui-meme) : on saute alors la page nous-memes et on
+        # redessine l'en-tete AVANT la ligne, plutot que de laisser le saut
+        # automatique se produire au milieu de la ligne sans en-tete au-
+        # dessus.
+        if pdf.will_page_break(row_height):
+            pdf.add_page()
+            _draw_table_header()
         # Un nom de projet trop long deborderait sur les colonnes suivantes
         # (cell() ne retourne pas a la ligne et n'empeche pas le
         # depassement) : on le tronque avec une ellipse pour qu'il tienne
@@ -294,10 +355,10 @@ def generate_invoice_pdf(
         hours_text = _truncate_to_width(f"{item.hours:.2f} h", col_widths[1])
         rate_text = _truncate_to_width(format_amount(item.rate, currency) + "/h", col_widths[2])
         amount_text = _truncate_to_width(format_amount(item.amount, currency), col_widths[3])
-        pdf.cell(col_widths[0], 7, label, border=1)
-        pdf.cell(col_widths[1], 7, hours_text, border=1, align="R")
-        pdf.cell(col_widths[2], 7, rate_text, border=1, align="R")
-        pdf.cell(col_widths[3], 7, amount_text, border=1, align="R")
+        pdf.cell(col_widths[0], row_height, label, border=1)
+        pdf.cell(col_widths[1], row_height, hours_text, border=1, align="R")
+        pdf.cell(col_widths[2], row_height, rate_text, border=1, align="R")
+        pdf.cell(col_widths[3], row_height, amount_text, border=1, align="R")
         pdf.ln()
 
     pdf.ln(4)

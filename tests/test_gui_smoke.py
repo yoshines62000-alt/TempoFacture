@@ -4,6 +4,7 @@ seuls tkinter.messagebox, tkinter.filedialog et tkinter.simpledialog sont
 mockes, comme dans le reste de la suite, pour ne jamais faire dependre un
 test automatise d'un clic humain sur une boite de dialogue modale."""
 
+import re
 import sys
 import tempfile
 import tkinter
@@ -190,8 +191,149 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         values_own = self.app.projects_tree.item(str(project_with_own_rate), "values")
         values_inherit = self.app.projects_tree.item(str(project_inheriting), "values")
-        self.assertEqual(values_own[3], "90.00 EUR")
-        self.assertEqual(values_inherit[3], "40.00 EUR")
+        # Separateur decimal francais (virgule), voir B7 : "90,00 EUR", pas
+        # "90.00 EUR".
+        self.assertEqual(values_own[3], "90,00 EUR")
+        self.assertEqual(values_inherit[3], "40,00 EUR")
+
+    # -- item audit Phase 6, C2 : self._currency() (requete "settings") ----
+    # -- ne doit etre interroge qu'une seule fois par rafraichissement de --
+    # -- la liste Clients, pas une fois par ligne affichee (meme anti- -----
+    # -- pattern, accessoire de C1, deja corrige pour _refresh_projects) ---
+
+    def test_refresh_clients_queries_the_currency_setting_only_once(self):
+        self.app.db.add_client("Client A", hourly_rate=10.0)
+        self.app.db.add_client("Client B", hourly_rate=20.0)
+        self.app.db.add_client("Client C", hourly_rate=30.0)
+
+        with patch.object(self.app, "_currency", wraps=self.app._currency) as spy_currency:
+            self.app._refresh_clients()
+
+        spy_currency.assert_called_once()
+        self.assertEqual(len(self.app.clients_tree.get_children()), 3)
+
+    # -- item audit Phase 6, E2 : aucun formulaire ne se soumettait au ------
+    # -- clavier (touche Entree) avant ce correctif - les tests ci-dessous -
+    # -- verifient que le VRAI gestionnaire lie a <Return>/<Escape> est ----
+    # -- effectivement appele, sur chaque formulaire principal et chaque ---
+    # -- mini-dialogue. Note methodologique : synthetiser un vrai evenement
+    # -- clavier (widget.event_generate("<Return>")) a ete essaye en premier
+    # -- mais s'est avere non fiable dans ce harnais de tests (fonctionne en
+    # -- isolation, mais Windows restreint le vol de focus clavier repete
+    # -- par un meme processus des que plusieurs tests s'enchainent dans la
+    # -- meme suite - echecs intermittents constates empiriquement selon
+    # -- l'ordre d'execution). On invoque donc directement la commande Tcl
+    # -- deja enregistree par bind() - ce qui exerce le VRAI callback Python
+    # -- cible de maniere deterministe - plutot que de simuler la frappe au
+    # -- niveau du systeme d'exploitation. Meme categorie de limitation deja
+    # -- documentee pour <Double-1>, voir
+    # -- test_clients_and_projects_trees_have_a_double_click_binding_wired.
+
+    def _invoke_bound_key(self, widget, sequence, *, keysym, keycode, keysym_num, char):
+        script = widget.bind(sequence)
+        match = re.search(r"\[(\S+) %#", script or "")
+        if match is None:
+            raise AssertionError(f"aucun binding {sequence} enregistre sur {widget}")
+        funcid = match.group(1)
+        # Args factices correspondant a l'ordre attendu par
+        # tkinter.Misc._substitute (%# %b %f %h %k %s %t %w %x %y %A %E %K
+        # %N %W %T %X %Y %D) : seuls %K (keysym) et %N (keysym_num)
+        # importent reellement ici puisque nos gestionnaires ignorent le
+        # contenu de l'evenement, mais tous les champs doivent avoir un
+        # type Tcl valide (entier/booleen) pour que la substitution interne
+        # de tkinter ne leve pas d'exception.
+        args = ["1", "0", "0", "0", keycode, "0", "0", "0", "0", "0", char, "0", keysym, keysym_num, str(widget), "2", "0", "0", "0"]
+        widget.tk.call(funcid, *args)
+
+    def _invoke_return(self, widget):
+        self._invoke_bound_key(widget, "<Return>", keysym="Return", keycode="36", keysym_num="65293", char="\r")
+
+    def _invoke_escape(self, widget):
+        self._invoke_bound_key(widget, "<Escape>", keysym="Escape", keycode="27", keysym_num="65307", char="\x1b")
+
+    def _invoke_key_on_open_dialog(self, invoke_fn):
+        """A utiliser via root.after(...) pendant qu'un dialogue modal
+        (Toplevel avec grab_set()/wait_window()) est ouvert. Toute erreur
+        est deliberement avalee ici plutot que remontee via assertTrue/
+        assertIsNotNone : une exception levee dans un callback planifie par
+        after() ne fait pas echouer le test (elle part dans
+        root.report_callback_exception, deja surcharge par l'application
+        pour afficher une VRAIE boite tkinter.messagebox non mockee dans ce
+        contexte, ce qui bloquerait indefiniment toute la suite de tests en
+        attendant un clic humain). Le succes ou l'echec du correctif E2 est
+        verifie par le test appelant sur la valeur RENVOYEE par le dialogue
+        une fois wait_window() debloque, jamais depuis ce callback."""
+        for widget in self.app.root.winfo_children():
+            if isinstance(widget, tkinter.Toplevel):
+                try:
+                    invoke_fn(widget)
+                except Exception:
+                    pass
+                finally:
+                    if widget.winfo_exists():
+                        widget.destroy()
+                return
+
+    def _invoke_return_on_open_dialog(self):
+        self._invoke_key_on_open_dialog(self._invoke_return)
+
+    def _invoke_escape_on_open_dialog(self):
+        self._invoke_key_on_open_dialog(self._invoke_escape)
+
+    def test_pressing_return_in_the_client_form_submits_it(self):
+        with patch.object(self.app, "_add_client") as mock_add:
+            self._invoke_return(self.app.client_name_entry)
+        mock_add.assert_called_once()
+
+    def test_pressing_return_in_the_project_form_submits_it(self):
+        with patch.object(self.app, "_add_project") as mock_add:
+            self._invoke_return(self.app.project_name_entry)
+        mock_add.assert_called_once()
+
+    def test_pressing_return_in_the_manual_time_entry_form_submits_it(self):
+        with patch.object(self.app, "_add_manual_entry") as mock_add:
+            self._invoke_return(self.app.manual_hours_entry)
+        mock_add.assert_called_once()
+
+    def test_pressing_return_in_the_invoice_tax_field_generates_the_invoice(self):
+        with patch.object(self.app, "_generate_invoice") as mock_generate:
+            self._invoke_return(self.app.invoice_tax_entry)
+        mock_generate.assert_called_once()
+
+    def test_pressing_return_in_the_settings_form_saves_settings(self):
+        with patch.object(self.app, "_save_settings") as mock_save:
+            self._invoke_return(self.app.settings_currency_entry)
+        mock_save.assert_called_once()
+
+    def test_pressing_return_in_the_client_edit_dialog_saves_it(self):
+        self.app.root.after(50, self._invoke_return_on_open_dialog)
+        result = self.app._prompt_client_fields("Modifier le client", "Nom Original", "mail@test.fr", "1 rue Test", 50.0)
+        self.assertEqual(result, {"name": "Nom Original", "email": "mail@test.fr", "address": "1 rue Test", "hourly_rate": "50.0"})
+
+    def test_pressing_escape_in_the_client_edit_dialog_cancels_it(self):
+        self.app.root.after(50, self._invoke_escape_on_open_dialog)
+        result = self.app._prompt_client_fields("Modifier le client", "Nom Original", "", "", 50.0)
+        self.assertIsNone(result)
+
+    def test_pressing_return_in_the_project_edit_dialog_saves_it(self):
+        self.app.root.after(50, self._invoke_return_on_open_dialog)
+        result = self.app._prompt_project_fields("Modifier le projet", "Projet X", 75.0)
+        self.assertEqual(result, {"name": "Projet X", "hourly_rate": "75.0"})
+
+    def test_pressing_escape_in_the_project_edit_dialog_cancels_it(self):
+        self.app.root.after(50, self._invoke_escape_on_open_dialog)
+        result = self.app._prompt_project_fields("Modifier le projet", "Projet X", 75.0)
+        self.assertIsNone(result)
+
+    def test_pressing_return_in_the_time_entry_edit_dialog_saves_it(self):
+        self.app.root.after(50, self._invoke_return_on_open_dialog)
+        result = self.app._prompt_time_entry_fields("Modifier l'entree", "2.5", "Description")
+        self.assertEqual(result, {"hours": "2.5", "description": "Description"})
+
+    def test_pressing_escape_in_the_time_entry_edit_dialog_cancels_it(self):
+        self.app.root.after(50, self._invoke_escape_on_open_dialog)
+        result = self.app._prompt_time_entry_fields("Modifier l'entree", "2.5", "Description")
+        self.assertIsNone(result)
 
     def test_invoice_search_filters_by_number_client_or_status(self):
         client_id = self.app.db.add_client("Client Facture")
