@@ -1,0 +1,27 @@
+# Fichier de verrouillage pour un build de release REPRODUCTIBLE
+# (constat d'audit, 2026-07-28) - complement de requirements.txt (qui garde
+# volontairement une plage ouverte ">=2.7" pour les contributeurs qui
+# lancent TempoFacture depuis le code source), PAS un remplacement.
+#
+# requirements.txt seul ne garantit rien : deux builds de dist/TempoFacture.exe
+# a des dates differentes peuvent embarquer des versions differentes de
+# `fpdf2` (et de sa propre chaine de dependances : defusedxml, fonttools,
+# Pillow) sans que cela soit trace nulle part. Les versions ci-dessous sont
+# celles reellement utilisees dans l'environnement de developpement au moment
+# de cet audit (verifiees via `pip show fpdf2` / `pip freeze`), figees
+# explicitement plutot que laissees a la resolution de dependances du jour.
+#
+# A REGENERER et committer AVANT chaque nouvelle release, dans
+# l'environnement de build reellement utilise pour PyInstaller :
+#
+#   python -m pip install --upgrade -r requirements.txt
+#   python -m pip freeze | findstr /i "fpdf2 defusedxml fonttools pillow" > requirements-lock.txt
+#
+# Pour un build reproductible a partir de ce fichier :
+#
+#   python -m pip install -r requirements-lock.txt
+#   python -m PyInstaller TempoFacture.spec
+fpdf2==2.8.7
+defusedxml==0.7.1
+fonttools==4.63.0
+pillow==12.2.0

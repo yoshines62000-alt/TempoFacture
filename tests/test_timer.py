@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import Database
-from timer import Timer, get_idle_seconds
+from timer import Timer, get_idle_seconds, get_uptime_seconds
 
 
 class TimerTestCase(unittest.TestCase):
@@ -75,6 +75,18 @@ class TimerTestCase(unittest.TestCase):
     def test_sleep_gap_seconds_is_zero_when_not_running(self):
         self.assertEqual(self.timer.sleep_gap_seconds(), 0.0)
 
+    def test_stop_removing_idle_time_resets_start_wall(self):
+        # Bug trouve a l'audit (2026-07-28) : contrairement a stop(),
+        # stop_removing_idle_time() ne remettait pas _start_wall a None -
+        # l'etat interne du Timer restait donc incoherent une fois arrete
+        # (is_running est False mais _start_wall pointait encore vers
+        # l'ancien demarrage).
+        self.timer.start(self.project_id)
+        self.assertIsNotNone(self.timer._start_wall)
+        self.timer.stop_removing_idle_time(idle_seconds=1.0)
+        self.assertIsNone(self.timer._start_wall)
+        self.assertIsNone(self.timer._start_monotonic)
+
     def test_format_duration(self):
         self.assertEqual(Timer.format_duration(0), "00:00:00")
         self.assertEqual(Timer.format_duration(3661), "01:01:01")
@@ -110,6 +122,31 @@ class GetIdleSecondsTestCase(unittest.TestCase):
              patch("ctypes.windll.kernel32.GetTickCount64", return_value=5000):
             idle = get_idle_seconds()
         self.assertAlmostEqual(idle, 12.296, places=2)
+
+
+class GetUptimeSecondsTestCase(unittest.TestCase):
+    # Bug trouve a l'audit (2026-07-28) : sans get_uptime_seconds(),
+    # _restore_running_timer() dans gui.py n'avait aucun moyen de detecter
+    # qu'une extinction complete du PC (pas juste une fermeture propre de
+    # l'app) avait eu lieu pendant qu'un chronometre tournait - voir
+    # test_gui_smoke.py pour les tests bout-en-bout de la restauration.
+
+    def test_returns_a_plausible_float_without_crashing(self):
+        # Test d'integration reel (pas mocke), meme principe que
+        # GetIdleSecondsTestCase ci-dessus : verifie juste que l'appel Win32
+        # fonctionne sur cette machine et renvoie un nombre plausible.
+        uptime = get_uptime_seconds()
+        self.assertIsInstance(uptime, float)
+        self.assertGreaterEqual(uptime, 0.0)
+
+    def test_returns_none_when_gettickcount64_fails(self):
+        # None (pas 0.0) signale explicitement "impossible a savoir", pour
+        # que l'appelant ne confonde jamais cette situation avec une machine
+        # qui vient reellement de demarrer (uptime proche de zero) - une
+        # confusion qui declencherait un faux positif systematique de
+        # detection d'extinction a chaque restauration.
+        with patch("ctypes.windll.kernel32.GetTickCount64", side_effect=OSError("boom")):
+            self.assertIsNone(get_uptime_seconds())
 
 
 if __name__ == "__main__":

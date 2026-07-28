@@ -47,6 +47,25 @@ def get_idle_seconds() -> float:
         return 0.0
 
 
+def get_uptime_seconds() -> Optional[float]:
+    """Secondes ecoulees depuis le dernier demarrage (boot) de la machine,
+    via GetTickCount64 - utilise a la restauration de session pour detecter
+    qu'une extinction complete du PC (pas juste une fermeture propre de
+    l'application) a eu lieu pendant qu'un chronometre etait en cours (voir
+    _restore_running_timer dans gui.py) : si l'uptime actuel est inferieur au
+    temps ecoule depuis le demarrage du chronometre, la machine a
+    necessairement redemarre entre-temps.
+    Renvoie None si l'information est indisponible (plateforme non-Windows,
+    appel echoue) plutot que 0.0, pour distinguer "la machine vient de
+    demarrer" (uptime reellement proche de zero) de "impossible a savoir"
+    (qui ne doit jamais declencher de faux positif de detection hors-ligne)."""
+    try:
+        ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+        return ctypes.windll.kernel32.GetTickCount64() / 1000.0
+    except (AttributeError, OSError):
+        return None
+
+
 class Timer:
     """Chronometre relie a la base de donnees : demarre/arrete une entree de
     temps reelle (persistee), garde en memoire uniquement l'instant de
@@ -117,6 +136,14 @@ class Timer:
         self.active_entry_id = None
         self.project_id = None
         self._start_monotonic = None
+        # Bug trouve a l'audit (2026-07-28) : contrairement a stop() ci-dessus,
+        # _start_wall n'etait jamais remis a None ici - sleep_gap_seconds()
+        # restait donc a calculer un ecart horloge murale / compteur moniteur
+        # a partir d'un ancien _start_wall perime des le prochain demarrage du
+        # chronometre (avant que start() ne le reaffecte), et is_running vaut
+        # deja False juste apres cet appel donc sleep_gap_seconds() renvoie
+        # 0.0 entre-temps - mais l'etat interne restait incoherent avec stop().
+        self._start_wall = None
         return entry_id
 
     def elapsed_seconds(self) -> float:

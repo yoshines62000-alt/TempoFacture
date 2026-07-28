@@ -474,6 +474,67 @@ class GuiSmokeTestCase(unittest.TestCase):
         entry = self.app.db.get_time_entry(entry_id)
         self.assertEqual(entry["project_id"], original_project)  # jamais reassignee
 
+    # -- item audit (2026-07-28), moyen 1 : les heures du tableau de l'onglet
+    # -- Chronometre etaient affichees en UTC brut (jamais converties en ------
+    # -- heure locale), malgre l'entete de db.py qui affirmait que la --------
+    # -- conversion se faisait "a l'affichage (gui.py)" ----------------------
+
+    def test_time_entries_are_displayed_converted_to_local_time_not_raw_utc(self):
+        from datetime import datetime
+
+        client_id = self.app.db.add_client("Client")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        entry_id = self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:30:00+00:00", "2026-01-01T11:15:00+00:00", "Travail"
+        )
+        self.app._refresh_time_entries()
+
+        expected_start = datetime.fromisoformat("2026-01-01T09:30:00+00:00").astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        expected_end = datetime.fromisoformat("2026-01-01T11:15:00+00:00").astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        values = self.app.entries_tree.item(str(entry_id), "values")
+        # index 2 = colonne "start", index 3 = colonne "end" (voir `columns`
+        # dans _build_timer_tab).
+        self.assertEqual(values[2], expected_start)
+        self.assertEqual(values[3], expected_end)
+
+    # -- item audit (2026-07-28), faible 1 : _refresh_time_entries n'avait ---
+    # -- aucune limite ni pagination sur le nombre d'entrees affichees, ------
+    # -- ce qui pouvait ralentir l'UI sur un historique long (voir -----------
+    # -- ENTRIES_DISPLAY_LIMIT, meme principe que HISTORY_DISPLAY_LIMIT ------
+    # -- dans DownloadOrganizer) ----------------------------------------------
+
+    def test_refresh_time_entries_limits_display_and_shows_the_most_recent(self):
+        client_id = self.app.db.add_client("Client")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        entry_ids = []
+        for day in range(1, 9):
+            entry_ids.append(self.app.db.add_manual_time_entry(
+                project_id, f"2026-01-{day:02d}T09:00:00+00:00", f"2026-01-{day:02d}T10:00:00+00:00",
+                f"Jour {day}",
+            ))
+
+        with patch.object(gui, "ENTRIES_DISPLAY_LIMIT", 3):
+            self.app._refresh_time_entries()
+
+        # Seules les 3 plus recentes (les dernieres du tri croissant par
+        # start_time) doivent apparaitre, jamais les plus anciennes.
+        self.assertEqual(
+            list(self.app.entries_tree.get_children()),
+            [str(entry_ids[-3]), str(entry_ids[-2]), str(entry_ids[-1])],
+        )
+        self.assertIn("3 entrees les plus recentes sur 8", self.app.entries_summary_var.get())
+
+    def test_refresh_time_entries_summary_shows_plain_count_when_under_the_limit(self):
+        client_id = self.app.db.add_client("Client")
+        project_id = self.app.db.add_project(client_id, "Projet")
+        self.app.db.add_manual_time_entry(
+            project_id, "2026-01-01T09:00:00+00:00", "2026-01-01T10:00:00+00:00", "Travail"
+        )
+
+        self.app._refresh_time_entries()
+
+        self.assertEqual(self.app.entries_summary_var.get(), "1 entree(s) de temps.")
+
     def test_invoice_search_filters_by_number_client_or_status(self):
         client_id = self.app.db.add_client("Client Facture")
         project_id = self.app.db.add_project(client_id, "Projet")
@@ -1018,6 +1079,91 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._restore_running_timer()
 
         self.assertEqual(self.app.timer_description_var.get(), "valeur avant appel")
+
+    # -- item audit (2026-07-28) : une extinction complete du PC pendant ---
+    # -- qu'un chronometre tournait ne doit plus jamais etre incluse -------
+    # -- silencieusement dans le temps facture a la reouverture de l'app ---
+    # -- (l'ecart est detecte via l'uptime machine, get_uptime_seconds, et -
+    # -- propose au retrait plutot qu'inclus sans rien dire) ----------------
+
+    def _start_running_entry_in_the_past(self, hours_ago: float):
+        from datetime import datetime, timedelta, timezone
+
+        client_id = self.app.db.add_client("Client Extinction PC")
+        project_id = self.app.db.add_project(client_id, "Projet Extinction PC")
+        entry_id = self.app.db.start_time_entry(project_id, "Travail avant extinction")
+        past_start = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        self.app.db.update_time_entry(entry_id, start_time=past_start.isoformat())
+        self.app._refresh_timer_project_choices()
+        return entry_id
+
+    def test_restoring_after_a_full_shutdown_offers_to_remove_the_offline_time(self):
+        # Le chronometre tournait depuis 3h (heure de debut en base), mais la
+        # machine n'a redemarre (uptime) que depuis 2 minutes : les ~3h moins
+        # 2 minutes sont necessairement du temps hors-ligne (PC eteint), pas
+        # du temps de travail reel.
+        entry_id = self._start_running_entry_in_the_past(hours_ago=3)
+
+        with patch.object(gui, "get_uptime_seconds", return_value=120.0), \
+             patch("tkinter.messagebox.askyesno", return_value=True) as askyesno:
+            self.app._restore_running_timer()
+
+        askyesno.assert_called_once()
+        # L'heure de debut persistee en base a ete avancee pour exclure le
+        # temps hors-ligne : la duree restante (depuis la nouvelle start_time
+        # jusqu'a maintenant) doit etre proche de l'uptime (~120s), pas des
+        # ~3h d'origine.
+        from datetime import datetime, timezone
+        updated = self.app.db.get_time_entry(entry_id)
+        new_start = datetime.fromisoformat(updated["start_time"])
+        remaining = (datetime.now(timezone.utc) - new_start).total_seconds()
+        self.assertLess(remaining, 300)
+        # Le compteur affiche en memoire reflete lui aussi le retrait.
+        self.assertLess(self.app.timer.elapsed_seconds(), 300)
+
+    def test_restoring_after_a_full_shutdown_can_keep_the_offline_time_if_declined(self):
+        # Meme scenario, mais l'utilisateur refuse le retrait propose :
+        # l'heure de debut en base ne doit pas etre modifiee, et le temps
+        # affiche doit continuer a inclure les ~3h d'origine (l'utilisateur
+        # pourra toujours l'ajuster lui-meme ensuite, via l'edition manuelle
+        # de l'entree).
+        entry_id = self._start_running_entry_in_the_past(hours_ago=3)
+        original_start = self.app.db.get_time_entry(entry_id)["start_time"]
+
+        with patch.object(gui, "get_uptime_seconds", return_value=120.0), \
+             patch("tkinter.messagebox.askyesno", return_value=False) as askyesno:
+            self.app._restore_running_timer()
+
+        askyesno.assert_called_once()
+        self.assertEqual(self.app.db.get_time_entry(entry_id)["start_time"], original_start)
+        self.assertGreater(self.app.timer.elapsed_seconds(), 3 * 3600 - 60)
+
+    def test_restoring_does_not_prompt_when_uptime_is_unavailable(self):
+        # Si l'uptime machine ne peut pas etre lu (plateforme non geree,
+        # appel Win32 en echec - voir get_uptime_seconds), on ne doit jamais
+        # inventer une extinction : mieux vaut ne rien detecter que generer
+        # un faux positif systematique a chaque restauration.
+        self._start_running_entry_in_the_past(hours_ago=3)
+
+        with patch.object(gui, "get_uptime_seconds", return_value=None), \
+             patch("tkinter.messagebox.askyesno") as askyesno:
+            self.app._restore_running_timer()
+
+        askyesno.assert_not_called()
+
+    def test_restoring_does_not_prompt_when_uptime_covers_the_full_elapsed_time(self):
+        # Non-regression : si la machine n'a jamais redemarre depuis le
+        # debut du chronometre (uptime >= temps ecoule), il n'y a par
+        # definition aucune extinction a detecter - c'est le cas courant
+        # d'une simple fermeture/reouverture de l'application, deja couvert
+        # par les tests E1 ci-dessus sans avoir besoin de mocker l'uptime.
+        self._start_running_entry_in_the_past(hours_ago=3)
+
+        with patch.object(gui, "get_uptime_seconds", return_value=10 * 3600), \
+             patch("tkinter.messagebox.askyesno") as askyesno:
+            self.app._restore_running_timer()
+
+        askyesno.assert_not_called()
 
     # -- item audit, F1 : la date par defaut de la saisie manuelle doit ----
     # -- etre en UTC, comme le reste de l'application (l'echeance des ------

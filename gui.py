@@ -13,7 +13,7 @@ from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, StringVar, Tk
 import update_checker
 from db import Database, TVA_EXEMPTION_NOTE
 from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf, reexport_invoice_pdf
-from timer import Timer, get_idle_seconds
+from timer import Timer, get_idle_seconds, get_uptime_seconds
 from csv_export import export_time_entries_csv, export_invoices_csv
 
 APP_TITLE = "TempoFacture"
@@ -23,8 +23,23 @@ UPDATE_REPO = "yoshines62000-alt/TempoFacture"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
 IDLE_CHECK_INTERVAL_MS = 15_000
+# Marge de tolerance sous laquelle un ecart entre l'uptime machine et le temps
+# ecoule depuis le demarrage du chronometre est ignore (delai de demarrage de
+# l'app, imprecision des deux horloges) plutot que traite comme une extinction
+# complete du PC a signaler a l'utilisateur - voir _offline_gap_seconds.
+OFFLINE_GAP_THRESHOLD_SECONDS = 60
 SEARCH_DEBOUNCE_MS = 250  # attend une pause dans la frappe avant de rafraichir une liste (factures/clients/projets)
 LOG_FILE_NAME = "tempofacture.log"
+# Nombre max d'entrees de temps affichees d'un coup dans le tableau de l'onglet
+# Chronometre (constat d'audit, 2026-07-28) : sans limite, un historique long
+# (des annees de suivi) ralentissait le rafraichissement de l'UI a chaque
+# demarrage/arret du chronometre, alors que _refresh_time_entries() est
+# appelee tres frequemment. Seules les entrees les plus recentes sont
+# affichees ; le total reel reste visible via le libelle sous le tableau, et
+# l'export CSV (_export_time_entries_csv) continue de porter sur TOUTES les
+# entrees, jamais seulement celles affichees. Meme principe que
+# HISTORY_DISPLAY_LIMIT dans DownloadOrganizer.
+ENTRIES_DISPLAY_LIMIT = 200
 
 _logger = logging.getLogger("tempofacture")
 
@@ -797,6 +812,11 @@ class TempoFactureApp:
         self.entries_tree.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
         self.entries_tree.bind("<Double-1>", self._edit_time_entry)
 
+        self.entries_summary_var = StringVar(value="")
+        ttk.Label(frame, textvariable=self.entries_summary_var, foreground="#666").pack(
+            anchor="w", padx=10, pady=(0, 4)
+        )
+
         entries_actions = ttk.Frame(frame)
         entries_actions.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Label(entries_actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(side=LEFT)
@@ -814,14 +834,42 @@ class TempoFactureApp:
 
     def _refresh_time_entries(self):
         self.entries_tree.delete(*self.entries_tree.get_children())
+        from datetime import datetime
         from invoice import compute_duration_hours
-        for entry in self.db.list_time_entries():
+
+        entries = self.db.list_time_entries()
+        # Constat d'audit (2026-07-28) : tableau non borne (voir
+        # ENTRIES_DISPLAY_LIMIT plus haut). list_time_entries() trie par
+        # start_time croissant, donc les plus recentes sont en fin de liste -
+        # on ne tronque que l'affichage, jamais les donnees elles-memes
+        # (export CSV, factures, etc. continuent de porter sur tout).
+        displayed = entries[-ENTRIES_DISPLAY_LIMIT:] if len(entries) > ENTRIES_DISPLAY_LIMIT else entries
+        for entry in displayed:
             hours = compute_duration_hours(entry["start_time"], entry["end_time"]) if entry["end_time"] else None
+            # Constat d'audit (2026-07-28) : les heures sont stockees en UTC
+            # (voir l'entete de db.py), mais etaient jusqu'ici affichees
+            # brutes (sans conversion) - .astimezone() sans argument convertit
+            # vers le fuseau local du poste avant affichage, comme le
+            # documente (mais ne faisait pas) l'entete de db.py.
+            start_local = datetime.fromisoformat(entry["start_time"]).astimezone()
+            start_display = start_local.strftime("%Y-%m-%d %H:%M:%S")
+            if entry["end_time"]:
+                end_display = datetime.fromisoformat(entry["end_time"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                end_display = "(en cours)"
             self.entries_tree.insert("", END, iid=str(entry["id"]), values=(
-                entry["id"], entry["project_name"], entry["start_time"][:19].replace("T", " "),
-                entry["end_time"][:19].replace("T", " ") if entry["end_time"] else "(en cours)",
+                entry["id"], entry["project_name"], start_display, end_display,
                 f"{hours:.2f}" if hours is not None else "-", entry["description"],
             ))
+
+        total = len(entries)
+        if total > len(displayed):
+            self.entries_summary_var.set(
+                f"Affichage des {len(displayed)} entrees les plus recentes sur {total} au total "
+                "(exportez en CSV pour tout consulter)."
+            )
+        else:
+            self.entries_summary_var.set(f"{total} entree(s) de temps.")
 
     def _export_time_entries_csv(self):
         entries = self.db.list_time_entries()
@@ -885,14 +933,59 @@ class TempoFactureApp:
             self.timer_project_var.set(f"{project['id']} - {project['name']}")
         self.timer_description_var.set(running["description"] or "")
         import time as _time
-        from datetime import datetime
+        from datetime import datetime, timedelta
         started = datetime.fromisoformat(running["start_time"])
         elapsed = (datetime.now(started.tzinfo) - started).total_seconds()
+        # Bug trouve a l'audit (2026-07-28) : si le PC a ete completement
+        # eteint (pas juste l'application fermee proprement) pendant que ce
+        # chronometre tournait, "elapsed" ci-dessus inclut silencieusement
+        # tout le temps hors-ligne (l'ecart horloge murale entre le
+        # demarrage et maintenant), qui se retrouverait facture comme du
+        # temps de travail reel. Contrairement a une simple veille geree en
+        # continu par sleep_gap_seconds() pendant que l'app tourne, une
+        # extinction complete est invisible ici puisque le processus lui-
+        # meme s'est arrete - on la detecte donc a la restauration via
+        # l'uptime machine (voir _offline_gap_seconds) et on laisse
+        # l'utilisateur decider, au lieu de l'inclure sans rien dire.
+        offline_gap = self._offline_gap_seconds(elapsed)
+        if offline_gap > 0:
+            minutes = int(offline_gap // 60)
+            remove = messagebox.askyesno(
+                APP_TITLE,
+                "Le chronometre etait toujours en cours au dernier arret de "
+                "l'ordinateur : une extinction complete (pas une simple "
+                f"fermeture de l'application) d'environ {minutes} minute(s) "
+                "a ete detectee pendant qu'il tournait.\n\n"
+                "Retirer ce temps hors-ligne du chronometre en cours ? "
+                "(vous pourrez toujours affiner l'heure de debut ensuite, "
+                "via un double-clic sur l'entree en cours dans le tableau "
+                "des heures)",
+            )
+            if remove:
+                started = started + timedelta(seconds=offline_gap)
+                self.db.update_time_entry(running["id"], start_time=started.isoformat())
+                elapsed -= offline_gap
         self.timer._start_monotonic = _time.monotonic() - elapsed
         self.timer._start_wall = _time.time() - elapsed
         self.timer_start_button.config(state="disabled")
         self.timer_stop_button.config(state="normal")
         self.timer_project_combo.config(state="disabled")
+
+    def _offline_gap_seconds(self, elapsed: float) -> float:
+        """Estime le temps que le PC a passe completement eteint (pas juste
+        l'application fermee) depuis "elapsed" secondes, pour
+        _restore_running_timer. Repose sur l'uptime machine (GetTickCount64,
+        via get_uptime_seconds) : un uptime inferieur a "elapsed" prouve que
+        la machine a redemarre entre-temps (extinction ou hibernation), la
+        difference etant alors du temps necessairement hors-ligne. Renvoie
+        0.0 si l'uptime est indisponible (jamais de faux positif) ou si
+        l'ecart reste sous OFFLINE_GAP_THRESHOLD_SECONDS (imprecision
+        normale, pas une vraie extinction)."""
+        uptime = get_uptime_seconds()
+        if uptime is None:
+            return 0.0
+        gap = elapsed - uptime
+        return gap if gap > OFFLINE_GAP_THRESHOLD_SECONDS else 0.0
 
     def _tick_timer(self):
         if self.timer.is_running:
