@@ -20,7 +20,7 @@ from csv_export import export_time_entries_csv, export_invoices_csv
 
 APP_TITLE = "TempoFacture"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-APP_VERSION = "1.0.18"
+APP_VERSION = "1.1.0"
 UPDATE_REPO = "yoshines62000-alt/TempoFacture"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 IDLE_THRESHOLD_SECONDS = 5 * 60  # valeur par defaut si aucun reglage n'existe encore en base
