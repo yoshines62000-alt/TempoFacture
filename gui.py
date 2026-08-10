@@ -10,6 +10,8 @@ import webbrowser
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, TOP, X, Y, BooleanVar, StringVar, Tk, ttk, messagebox, simpledialog
 
+import opl_theme
+import opl_contact
 import update_checker
 from db import Database, TVA_EXEMPTION_NOTE
 from invoice import LineItem, build_line_items, compute_totals, format_amount, generate_invoice_pdf, reexport_invoice_pdf
@@ -152,6 +154,8 @@ class TempoFactureApp:
                 self.root.iconbitmap(str(icon_path))
             except Exception:
                 pass
+
+        opl_theme.entete(self.root, "TempoFacture", "Suivi du temps et facturation", on_contact=lambda: opl_contact.ouvrir(self.root, app="TempoFacture", version=APP_VERSION)).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
@@ -1938,6 +1942,7 @@ class TempoFactureApp:
 
 def main():
     root = Tk()
+    opl_theme.apply(root, "TempoFacture")
     TempoFactureApp(root)
     root.mainloop()
 

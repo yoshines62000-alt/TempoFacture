@@ -5,7 +5,7 @@ a = Analysis(
     ['gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.'), ('fonts/NotoSansSC-Regular.otf', 'fonts')],
+    datas=[('opl_assets', 'opl_assets'), ('icon.ico', '.'), ('fonts/NotoSansSC-Regular.otf', 'fonts')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
