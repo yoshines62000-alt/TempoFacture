@@ -1050,6 +1050,11 @@ class GuiSmokeTestCase(unittest.TestCase):
 
     def test_only_free_text_columns_stretch_when_the_window_grows(self):
         self.root.deiconify()
+        # L'onglet Clients n'est plus l'onglet affiche par defaut (le
+        # Tableau de bord l'est) : un Treeview non mappe ne recalcule pas la
+        # largeur de ses colonnes au redimensionnement, on selectionne donc
+        # explicitement l'onglet Clients avant de mesurer.
+        self.app.notebook.select(self.app.clients_tab)
         self.root.update_idletasks()
         initial_name_width = self.app.clients_tree.column("name", "width")
         initial_id_width = self.app.clients_tree.column("id", "width")

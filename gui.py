@@ -126,6 +126,13 @@ def _handle_uncaught_exception(exc_type, exc_value, exc_tb) -> None:
         pass
 
 
+def _format_hours(hours: float) -> str:
+    """Formate une duree en heures decimales a la convention francaise
+    (virgule decimale), coherente avec format_amount pour le reste de
+    l'interface (voir invoice.format_amount, bug d'audit B7)."""
+    return f"{hours:.2f}".replace(".", ",") + " h"
+
+
 class TempoFactureApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -159,11 +166,11 @@ class TempoFactureApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
-        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground=opl_theme.couleur("texte_doux")).pack(side=LEFT, padx=(8, 0), pady=4)
         self.update_status_var = StringVar(value="")
-        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
-        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
@@ -172,19 +179,26 @@ class TempoFactureApp:
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
+        self.notebook = notebook
 
+        self.dashboard_tab = ttk.Frame(notebook)
         self.clients_tab = ttk.Frame(notebook)
         self.projects_tab = ttk.Frame(notebook)
         self.timer_tab = ttk.Frame(notebook)
         self.invoices_tab = ttk.Frame(notebook)
         self.settings_tab = ttk.Frame(notebook)
 
+        # Onglet d'accueil place en PREMIER : c'est la vue de synthese sur
+        # laquelle l'application s'ouvre (heures de la semaine/du mois,
+        # montant non facture, factures en retard).
+        notebook.add(self.dashboard_tab, text="Tableau de bord")
         notebook.add(self.clients_tab, text="Clients")
         notebook.add(self.projects_tab, text="Projets")
         notebook.add(self.timer_tab, text="Chronometre")
         notebook.add(self.invoices_tab, text="Factures")
         notebook.add(self.settings_tab, text="Parametres")
 
+        self._build_dashboard_tab()
         self._build_clients_tab()
         self._build_projects_tab()
         self._build_timer_tab()
@@ -196,6 +210,12 @@ class TempoFactureApp:
         self._refresh_timer_project_choices()
         self._refresh_invoices()
         self._restore_running_timer()
+        self._refresh_dashboard()
+
+        # Le tableau de bord se recalcule chaque fois qu'on revient dessus
+        # (une donnee a pu changer dans un autre onglet entre-temps) plutot
+        # que de le rafraichir en continu inutilement.
+        notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # Empeche l'utilisateur de redimensionner la fenetre en dessous de la
         # taille requise par l'onglet Factures (le plus charge), pour ne
@@ -232,13 +252,189 @@ class TempoFactureApp:
             return
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
-            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.configure(foreground=opl_theme.couleur("lien"), cursor="hand2")
             self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
         elif status == "up_to_date":
             self.update_status_var.set("A jour")
-            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+            self.update_status_label.configure(foreground=opl_theme.couleur("succes"), cursor="")
         # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
         # revendique rien plutot que d'afficher a tort "a jour".
+
+    # -- onglet Tableau de bord ---------------------------------------------
+
+    def _on_tab_changed(self, event=None):
+        # Recalcule la synthese chaque fois que l'onglet d'accueil (re)devient
+        # visible : une entree de temps, une facture ou un paiement a pu
+        # changer depuis un autre onglet entre-temps.
+        if self.notebook.select() == str(self.dashboard_tab):
+            self._refresh_dashboard()
+
+    def _build_dashboard_tab(self):
+        frame = self.dashboard_tab
+        ttk.Label(frame, text="Vue d'ensemble", style="Titre.TLabel").pack(
+            anchor="w", padx=14, pady=(14, 2)
+        )
+        ttk.Label(
+            frame, text="Synthese calculee depuis vos donnees locales.",
+            style="SousTitre.TLabel",
+        ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        # Rangee de cartes chiffrees : grille a colonnes de poids egal, pour
+        # qu'elles se repartissent equitablement l'espace au
+        # redimensionnement (uniform lie leurs largeurs).
+        cards = ttk.Frame(frame)
+        cards.pack(fill=X, padx=8)
+        for col in range(4):
+            cards.columnconfigure(col, weight=1, uniform="dash")
+
+        self.dash_week_var = StringVar(value="-")
+        self.dash_month_var = StringVar(value="-")
+        self.dash_uninvoiced_var = StringVar(value="-")
+        self.dash_uninvoiced_sub_var = StringVar(value="")
+        self.dash_overdue_var = StringVar(value="-")
+        self.dash_overdue_sub_var = StringVar(value="")
+
+        self._dash_card(cards, 0, "Cette semaine", self.dash_week_var, sub_text="Temps suivi")
+        self._dash_card(cards, 1, "Ce mois", self.dash_month_var, sub_text="Temps suivi")
+        self._dash_card(cards, 2, "Non facture", self.dash_uninvoiced_var, sub_var=self.dash_uninvoiced_sub_var)
+        # Reference gardee : la couleur du grand chiffre "en retard" bascule
+        # entre succes (a jour) et danger (impayes) a chaque rafraichissement.
+        self.dash_overdue_value = self._dash_card(
+            cards, 3, "Factures en retard", self.dash_overdue_var, sub_var=self.dash_overdue_sub_var
+        )
+
+        # Ligne chronometre en cours : toujours empaquetee (a sa place, entre
+        # les cartes et le detail), texte vide quand aucun chrono ne tourne.
+        self.dash_timer_var = StringVar(value="")
+        self.dash_timer_label = ttk.Label(frame, textvariable=self.dash_timer_var, style="Succes.TLabel")
+        self.dash_timer_label.pack(anchor="w", padx=14, pady=(12, 0))
+
+        # Detail : clients dont des heures facturables restent a facturer.
+        top = ttk.LabelFrame(frame, text="Heures non facturees par client")
+        top.pack(fill=BOTH, expand=True, padx=14, pady=(10, 12))
+        self.dash_top_tree = ttk.Treeview(top, columns=("client", "amount"), show="headings", height=6)
+        self.dash_top_tree.heading("client", text="Client")
+        self.dash_top_tree.heading("amount", text="Montant a facturer")
+        self.dash_top_tree.column("client", width=260, anchor="w", stretch=True)
+        self.dash_top_tree.column("amount", width=160, anchor="w", stretch=False)
+        self.dash_top_tree.pack(fill=BOTH, expand=True, padx=8, pady=8)
+        self.dash_top_empty_var = StringVar(value="")
+        self.dash_top_empty_label = ttk.Label(top, textvariable=self.dash_top_empty_var, style="SousTitre.TLabel")
+
+    def _dash_card(self, parent, col, title, value_var, *, sub_text="", sub_var=None):
+        card = ttk.LabelFrame(parent, text=title)
+        card.grid(row=0, column=col, sticky="nsew", padx=6, pady=4)
+        value = ttk.Label(card, textvariable=value_var, style="Display.TLabel")
+        value.pack(anchor="w", padx=10, pady=(8, 2))
+        sub = ttk.Label(card, style="SousTitre.TLabel")
+        if sub_var is not None:
+            sub.configure(textvariable=sub_var)
+        else:
+            sub.configure(text=sub_text)
+        sub.pack(anchor="w", padx=10, pady=(0, 8))
+        return value
+
+    def _refresh_dashboard(self):
+        if not hasattr(self, "dash_week_var"):
+            return
+        from datetime import datetime, timedelta
+        from invoice import compute_duration_hours
+
+        currency = self._currency()
+
+        # -- heures suivies cette semaine / ce mois (calendrier LOCAL) ------
+        # "cette semaine/ce mois" est une notion humaine de calendrier : on
+        # compare donc les dates converties en heure locale (astimezone),
+        # coherent avec l'affichage des entrees dans l'onglet Chronometre.
+        today = datetime.now().astimezone().date()
+        week_start = today - timedelta(days=today.weekday())  # lundi
+        month_start = today.replace(day=1)
+        week_hours = 0.0
+        month_hours = 0.0
+        for entry in self.db.list_time_entries(include_running=False):
+            try:
+                hours = compute_duration_hours(entry["start_time"], entry["end_time"])
+                day = datetime.fromisoformat(entry["start_time"]).astimezone().date()
+            except (ValueError, TypeError):
+                continue  # horodatage corrompu : on ignore cette seule entree
+            if day >= week_start:
+                week_hours += hours
+            if day >= month_start:
+                month_hours += hours
+        self.dash_week_var.set(_format_hours(week_hours))
+        self.dash_month_var.set(_format_hours(month_hours))
+
+        # -- montant non facture, ventile par client ------------------------
+        # Reutilise build_line_items (taux effectif par projet, arrondi
+        # commercial) plutot que de recalculer un montant a la main.
+        rows = []
+        grand_total = 0.0
+        for client in self.db.list_clients(include_archived=True):
+            entries = self.db.list_time_entries(client_id=client["id"], uninvoiced_only=True)
+            amount = sum(item.amount for item in build_line_items(entries, self.db))
+            if amount > 0:
+                rows.append((client["name"], amount))
+                grand_total += amount
+        rows.sort(key=lambda r: r[1], reverse=True)
+        self.dash_uninvoiced_var.set(format_amount(grand_total, currency))
+        n = len(rows)
+        self.dash_uninvoiced_sub_var.set("Tout est facture" if n == 0 else f"{n} client(s) concerne(s)")
+
+        self.dash_top_tree.delete(*self.dash_top_tree.get_children())
+        if rows:
+            self.dash_top_empty_label.pack_forget()
+            for name, amount in rows[:8]:
+                self.dash_top_tree.insert("", END, values=(name, format_amount(amount, currency)))
+        else:
+            self.dash_top_empty_var.set(
+                "Aucune heure non facturee : tout votre temps facturable est deja sur une facture."
+            )
+            self.dash_top_empty_label.pack(anchor="w", padx=8, pady=(0, 8))
+
+        # -- factures en retard (echeance depassee, non payees) -------------
+        # Total reconstruit depuis le snapshot fige des lignes (meme logique
+        # que _refresh_invoices), en une seule requete groupee.
+        overdue = self.db.list_overdue_invoices()
+        line_items_by_invoice: dict = {}
+        for li in self.db.get_all_invoice_line_items():
+            line_items_by_invoice.setdefault(li["invoice_id"], []).append(li)
+        overdue_total = 0.0
+        for invoice in overdue:
+            items = [
+                LineItem(r["project_name"], r["hours"], r["rate"])
+                for r in line_items_by_invoice.get(invoice["id"], [])
+            ]
+            _, _, total = compute_totals(items, invoice["tax_rate"])
+            overdue_total += total
+        count = len(overdue)
+        if count == 0:
+            self.dash_overdue_var.set("A jour")
+            self.dash_overdue_value.configure(foreground=opl_theme.couleur("succes"))
+            self.dash_overdue_sub_var.set("Aucune echeance depassee")
+        else:
+            plural = "s" if count > 1 else ""
+            self.dash_overdue_var.set(format_amount(overdue_total, currency))
+            self.dash_overdue_value.configure(foreground=opl_theme.couleur("danger"))
+            self.dash_overdue_sub_var.set(f"{count} facture{plural} impayee{plural}")
+
+        self._refresh_dashboard_timer()
+
+    def _refresh_dashboard_timer(self):
+        if not hasattr(self, "dash_timer_var"):
+            return
+        if self.timer.is_running:
+            name = ""
+            if self.timer.project_id is not None:
+                project = self.db.get_project(self.timer.project_id)
+                if project:
+                    name = project["name"]
+            elapsed = Timer.format_duration(self.timer.elapsed_seconds())
+            self.dash_timer_var.set(
+                f"Chronometre en cours : {name} - {elapsed}" if name
+                else f"Chronometre en cours - {elapsed}"
+            )
+        else:
+            self.dash_timer_var.set("")
 
     # -- utilitaires communs ------------------------------------------------
 
@@ -341,7 +537,7 @@ class TempoFactureApp:
         actions = ttk.Frame(frame)
         actions.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Button(actions, text="Archiver / desarchiver", command=self._toggle_client_archived).pack(side=LEFT)
-        ttk.Label(actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(
+        ttk.Label(actions, text="Double-cliquez sur une ligne pour la modifier.", foreground=opl_theme.couleur("texte_doux")).pack(
             side=LEFT, padx=(10, 0)
         )
 
@@ -463,7 +659,7 @@ class TempoFactureApp:
         ttk.Entry(dialog, textvariable=rate_var, width=30).grid(row=3, column=1, padx=10, pady=(0, 10))
         ttk.Label(
             dialog, text="Le nouveau taux ne s'applique qu'aux futures factures :\nles factures deja emises gardent leur montant d'origine.",
-            foreground="#666", justify=LEFT,
+            foreground=opl_theme.couleur("texte_doux"), justify=LEFT,
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
         def on_ok():
@@ -585,7 +781,7 @@ class TempoFactureApp:
         actions = ttk.Frame(frame)
         actions.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Button(actions, text="Archiver / desarchiver", command=self._toggle_project_archived).pack(side=LEFT)
-        ttk.Label(actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(
+        ttk.Label(actions, text="Double-cliquez sur une ligne pour la modifier.", foreground=opl_theme.couleur("texte_doux")).pack(
             side=LEFT, padx=(10, 0)
         )
 
@@ -817,13 +1013,13 @@ class TempoFactureApp:
         self.entries_tree.bind("<Double-1>", self._edit_time_entry)
 
         self.entries_summary_var = StringVar(value="")
-        ttk.Label(frame, textvariable=self.entries_summary_var, foreground="#666").pack(
+        ttk.Label(frame, textvariable=self.entries_summary_var, foreground=opl_theme.couleur("texte_doux")).pack(
             anchor="w", padx=10, pady=(0, 4)
         )
 
         entries_actions = ttk.Frame(frame)
         entries_actions.pack(fill=X, padx=10, pady=(0, 10))
-        ttk.Label(entries_actions, text="Double-cliquez sur une ligne pour la modifier.", foreground="#666").pack(side=LEFT)
+        ttk.Label(entries_actions, text="Double-cliquez sur une ligne pour la modifier.", foreground=opl_theme.couleur("texte_doux")).pack(side=LEFT)
         ttk.Button(entries_actions, text="Supprimer l'entree selectionnee", command=self._delete_time_entry).pack(side=RIGHT)
         ttk.Button(entries_actions, text="Exporter en CSV...", command=self._export_time_entries_csv).pack(side=RIGHT, padx=(0, 6))
 
@@ -994,6 +1190,9 @@ class TempoFactureApp:
     def _tick_timer(self):
         if self.timer.is_running:
             self.timer_display_var.set(Timer.format_duration(self.timer.elapsed_seconds()))
+            # Garde le chronometre du tableau de bord synchronise avec celui de
+            # l'onglet Chronometre quand il est affiche.
+            self._refresh_dashboard_timer()
         self.root.after(1000, self._tick_timer)
 
     def _check_idle(self):
@@ -1244,7 +1443,7 @@ class TempoFactureApp:
         tva_hint_row.pack(fill=X, padx=10, pady=(0, 5))
         self.tva_hint_var = StringVar()
         ttk.Label(
-            tva_hint_row, textvariable=self.tva_hint_var, foreground="#666",
+            tva_hint_row, textvariable=self.tva_hint_var, foreground=opl_theme.couleur("texte_doux"),
             wraplength=560, justify=LEFT,
         ).pack(side=LEFT)
         self.tva_hint_button = ttk.Button(
@@ -1299,11 +1498,11 @@ class TempoFactureApp:
             ],
             growable_columns=("client",),
         )
-        self.invoices_tree.tag_configure("overdue", foreground="#c0392b")
+        self.invoices_tree.tag_configure("overdue", foreground=opl_theme.couleur("danger"))
         self.invoices_tree.pack(fill=BOTH, expand=True, padx=10, pady=10)
 
         self.overdue_summary_var = StringVar(value="")
-        ttk.Label(frame, textvariable=self.overdue_summary_var, foreground="#c0392b").pack(
+        ttk.Label(frame, textvariable=self.overdue_summary_var, foreground=opl_theme.couleur("danger")).pack(
             anchor="w", padx=10, pady=(0, 6)
         )
 
