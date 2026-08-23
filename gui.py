@@ -162,7 +162,7 @@ class TempoFactureApp:
             except Exception:
                 pass
 
-        opl_theme.entete(self.root, "TempoFacture", "Suivi du temps et facturation", on_contact=lambda: opl_contact.ouvrir(self.root, app="TempoFacture", version=APP_VERSION)).pack(fill="x", side="top")
+        opl_theme.entete(self.root, "TempoFacture", "Suivi du temps et facturation", on_contact=lambda: opl_contact.ouvrir(self.root, app="TempoFacture", version=APP_VERSION), slug="tempofacture", version=APP_VERSION).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
