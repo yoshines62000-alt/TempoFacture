@@ -142,7 +142,7 @@ class TempoFactureApp:
         # besoin de 649px pour s'afficher entierement (mesure via
         # winfo_reqheight() - bug trouve a l'audit). 760px laisse une marge
         # confortable au-dessus de ce minimum sur un ecran 1920x1080.
-        self.root.geometry("980x760")
+        self.root.geometry("1150x760")
 
         # Doit etre en place avant tout le reste : c'est ce qui garantit
         # qu'une exception non prevue dans n'importe quel callback (clic de
@@ -177,7 +177,7 @@ class TempoFactureApp:
         self._update_check_queue = queue.Queue()
         self._maybe_start_update_check()
 
-        notebook = ttk.Notebook(self.root)
+        notebook = opl_theme.Rail(self.root)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
         self.notebook = notebook
 

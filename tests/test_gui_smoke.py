@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import opl_theme
 import gui
 from gui import TempoFactureApp
 
@@ -627,7 +628,7 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         notebook = None
         for child in self.root.winfo_children():
-            if isinstance(child, __import__("tkinter").ttk.Notebook):
+            if isinstance(child, opl_theme.Rail):
                 notebook = child
                 break
         self.assertIsNotNone(notebook, "Notebook principal introuvable")
