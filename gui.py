@@ -504,6 +504,12 @@ class TempoFactureApp:
             row=1, column=1, columnspan=4, sticky="we", pady=(5, 0)
         )
         ttk.Button(form, text="Ajouter le client", command=self._add_client).grid(row=1, column=5, pady=(5, 0))
+
+        # Les erreurs de saisie restent SOUS le formulaire, a cote des champs
+        # dont elles parlent, plutot que dans une fenetre modale que Windows
+        # dessine, qui masque le champ fautif et qu'il faut fermer avant de
+        # pouvoir corriger.
+        self.client_erreur = opl_theme.Erreur(frame, apres=form)
         # Valider le formulaire au clavier (touche Entree) plutot que de
         # forcer un clic souris sur "Ajouter le client" : l'usage courant de
         # l'app implique des saisies frequentes et rapides, et aucun
@@ -547,17 +553,26 @@ class TempoFactureApp:
         )
 
     def _add_client(self):
+        self.client_erreur.effacer()
         name = self.client_name_var.get().strip()
         if not name:
-            messagebox.showwarning(APP_TITLE, "Le nom du client est obligatoire.")
+            self.client_erreur.montrer(
+                "Nom", "un client a besoin d'un nom pour apparaitre sur ses factures.",
+                champ=self.client_name_entry)
             return
+        brut = self.client_rate_var.get().strip()
         try:
-            rate = float(self.client_rate_var.get().replace(",", ".") or 0)
+            rate = float(brut.replace(",", ".") or 0)
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
+            self.client_erreur.montrer(
+                "Taux horaire",
+                f"« {brut} » n'est pas un nombre. Un montant par heure, comme 65 ou 65,50.",
+                champ=self.client_rate_entry)
             return
         if rate < 0:
-            messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
+            self.client_erreur.montrer(
+                "Taux horaire", "un taux ne peut pas etre negatif. Laissez 0 si vous facturez au forfait.",
+                champ=self.client_rate_entry)
             return
         self.db.add_client(name, self.client_email_var.get().strip(), self.client_address_var.get().strip(), rate)
         self.client_name_var.set("")

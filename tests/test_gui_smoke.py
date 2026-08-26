@@ -647,6 +647,54 @@ class GuiSmokeTestCase(unittest.TestCase):
         min_width, min_height = self.root.wm_minsize()
         self.assertGreaterEqual(min_height, required_height)
 
+    # -- erreurs de saisie EN LIGNE (refonte du 2026-08-26) ----------------
+
+    def test_un_nom_de_client_vide_s_affiche_sous_le_formulaire_et_non_en_modale(self):
+        """Une erreur de saisie ne merite pas une fenetre modale : elle doit
+        rester a cote du champ dont elle parle, le marquer, et ne rien
+        bloquer."""
+        self.app.client_name_var.set("")
+        with patch("tkinter.messagebox.showwarning") as modale:
+            self.app._add_client()
+        self.assertTrue(self.app.client_erreur.visible, "l'erreur doit s'afficher en ligne")
+        modale.assert_not_called()
+        self.assertEqual(self.app.client_name_entry.cget("style"), "Erreur.TEntry",
+                         "le champ fautif doit etre marque")
+
+    def test_un_taux_horaire_non_numerique_nomme_le_champ_et_montre_un_exemple(self):
+        self.app.client_name_var.set("Client Martin")
+        self.app.client_rate_var.set("soixante-cinq")
+        with patch("tkinter.messagebox.showwarning") as modale:
+            self.app._add_client()
+        self.assertTrue(self.app.client_erreur.visible)
+        modale.assert_not_called()
+        self.assertEqual(self.app.client_rate_entry.cget("style"), "Erreur.TEntry")
+
+    def test_l_erreur_s_efface_des_que_le_champ_est_retouche(self):
+        """Corriger fait partie de la correction : l'utilisateur n'a pas a
+        fermer quoi que ce soit avant de pouvoir taper."""
+        self.app.client_name_var.set("")
+        # On patche meme ici : sans cela, une regression qui reviendrait a la
+        # messagebox ouvrirait une VRAIE fenetre modale et la suite resterait
+        # bloquee en attente d'un clic — un test qui pend ne prouve rien.
+        with patch("tkinter.messagebox.showwarning"):
+            self.app._add_client()
+        self.assertTrue(self.app.client_erreur.visible)
+        self.app.client_erreur.effacer()
+        self.assertFalse(self.app.client_erreur.visible)
+        self.assertEqual(self.app.client_name_entry.cget("style"), "TEntry",
+                         "le champ doit retrouver son apparence normale")
+
+    def test_un_client_valide_passe_sans_erreur(self):
+        """Contre-epreuve : le harnais ci-dessus doit pouvoir NE PAS se
+        declencher, sinon il ne prouve rien."""
+        self.app.client_name_var.set("Client Martin")
+        self.app.client_rate_var.set("65,50")
+        with patch("tkinter.messagebox.showwarning") as modale:
+            self.app._add_client()
+        self.assertFalse(self.app.client_erreur.visible)
+        modale.assert_not_called()
+
     # -- item audit D1 : gestionnaire d'exception Tk global + journalisation
     # -- (aucun echec silencieux dans l'exe empaquete, console=False) -------
 
