@@ -21,7 +21,17 @@
 #
 #   python -m pip install -r requirements-lock.txt
 #   python -m PyInstaller TempoFacture.spec
-fpdf2==2.8.7
+#
+# PLANCHER DE SECURITE - Pillow >= 12.3.0 (CVE-2026-25990, CVE-2026-40192).
+# TempoFacture ne tire Pillow qu'INDIRECTEMENT, par fpdf2, et n'embarque
+# aucune image : l'exposition reelle est nulle. Mais GuideExpress, PdfAtelier
+# et PhotoTri imposent ce plancher dans leur requirements.txt, et ce fichier
+# est le controle de release de CE projet : le laisser epingler une version
+# en dessous revenait a dire silencieusement le contraire des trois autres
+# (constat C8 de l'audit du 2026-08-26 - le verrou disait aussi fpdf2 2.8.7
+# quand l'environnement de developpement portait deja 2.8.8, exactement la
+# derive que ce fichier existe pour empecher).
+fpdf2==2.8.8
 defusedxml==0.7.1
 fonttools==4.63.0
-pillow==12.2.0
+pillow==12.3.0

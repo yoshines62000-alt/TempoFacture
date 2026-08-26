@@ -55,6 +55,12 @@ def _atomic_csv_write(output_path: Path, write_rows) -> None:
         # caracteres accentues d'un CSV UTF-8 que si le BOM est present.
         with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as f:
             write_rows(csv.writer(f))
+            # os.replace ne rend atomique que le RENOMMAGE, pas l'arrivee des
+            # octets sur le disque : sans ces deux lignes, une coupure de
+            # courant peut laisser un export en place, bien nomme, et vide
+            # (constat C9 de l'audit du 2026-08-26).
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, output_path)
     except BaseException:
         try:
