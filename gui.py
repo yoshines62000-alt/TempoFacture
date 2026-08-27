@@ -134,6 +134,59 @@ def _format_hours(hours: float) -> str:
     return f"{hours:.2f}".replace(".", ",") + " h"
 
 
+def _valider_taux(brut: str, *, vide_permis: str = "") -> tuple:
+    """Rend (intitule, explication) si le taux est fautif, sinon ()."""
+    try:
+        taux = float(brut.replace(",", ".") or 0)
+    except ValueError:
+        return ("Taux horaire",
+                f"« {brut} » n'est pas un nombre. Un montant par heure, comme 65 ou 65,50.")
+    if taux < 0:
+        return ("Taux horaire", "un taux ne peut pas etre negatif. " + vide_permis)
+    return ()
+
+
+def valider_client(valeurs: dict) -> tuple:
+    """La regle de saisie d'un client, en UN seul endroit.
+
+    Rend () si tout va bien, sinon (cle_du_champ, intitule, explication). La
+    cle designe le champ fautif : chaque surface (formulaire de la vue,
+    dialogue de modification) la traduit en widget a marquer.
+    """
+    if not valeurs.get("name", "").strip():
+        return ("name", "Nom",
+                "un client a besoin d'un nom pour apparaitre sur ses factures.")
+    faute = _valider_taux(valeurs.get("hourly_rate", "").strip(),
+                          vide_permis="Laissez 0 si vous facturez au forfait.")
+    return ("hourly_rate",) + faute if faute else ()
+
+
+def valider_projet(valeurs: dict) -> tuple:
+    """Meme contrat que valider_client, pour un projet."""
+    if not valeurs.get("name", "").strip():
+        return ("name", "Nom du projet",
+                "donnez-lui un nom, c'est ainsi qu'il apparaitra dans le chronometre.")
+    brut = valeurs.get("hourly_rate", "").strip()
+    if not brut:
+        return ()          # vide = le projet herite du taux de son client
+    faute = _valider_taux(brut, vide_permis="Laissez vide pour reprendre celui du client.")
+    return ("hourly_rate",) + faute if faute else ()
+
+
+def valider_heures(valeurs: dict) -> tuple:
+    """Meme contrat, pour une duree en heures."""
+    brut = valeurs.get("hours", "").strip()
+    try:
+        heures = float(brut.replace(",", "."))
+    except ValueError:
+        return ("hours", "Nombre d'heures",
+                f"« {brut} » n'est pas un nombre. Une duree en heures, comme 2 ou 1,5.")
+    if heures <= 0:
+        return ("hours", "Nombre d'heures",
+                "une entree de temps doit couvrir une duree, donc plus de zero.")
+    return ()
+
+
 class TempoFactureApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -566,28 +619,33 @@ class TempoFactureApp:
             side=LEFT, padx=(10, 0)
         )
 
+    @staticmethod
+    def _signaler(erreur, faute, champs) -> bool:
+        """Traduit le verdict d'un validateur en erreur affichee.
+
+        Rend True quand la saisie est bonne — la forme `if not self._signaler(
+        ...): return` se lit alors comme « si ca ne passe pas, on s'arrete ».
+        Les validateurs ne connaissent que des CLES de champ ; c'est ici, et
+        seulement ici, qu'une cle devient un widget a marquer."""
+        if not faute:
+            return True
+        cle, quoi, texte = faute
+        erreur.montrer(quoi, texte, champ=champs.get(cle))
+        return False
+
     def _add_client(self):
         self.client_erreur.effacer()
-        name = self.client_name_var.get().strip()
-        if not name:
-            self.client_erreur.montrer(
-                "Nom", "un client a besoin d'un nom pour apparaitre sur ses factures.",
-                champ=self.client_name_entry)
+        valeurs = {"name": self.client_name_var.get().strip(),
+                   "hourly_rate": self.client_rate_var.get().strip()}
+        # Meme regle et meme formulation que le dialogue de modification :
+        # elle vit dans `valider_client`, ici on ne fait que designer le
+        # widget correspondant a la cle rendue.
+        if not self._signaler(self.client_erreur, valider_client(valeurs),
+                              {"name": self.client_name_entry,
+                               "hourly_rate": self.client_rate_entry}):
             return
-        brut = self.client_rate_var.get().strip()
-        try:
-            rate = float(brut.replace(",", ".") or 0)
-        except ValueError:
-            self.client_erreur.montrer(
-                "Taux horaire",
-                f"« {brut} » n'est pas un nombre. Un montant par heure, comme 65 ou 65,50.",
-                champ=self.client_rate_entry)
-            return
-        if rate < 0:
-            self.client_erreur.montrer(
-                "Taux horaire", "un taux ne peut pas etre negatif. Laissez 0 si vous facturez au forfait.",
-                champ=self.client_rate_entry)
-            return
+        name = valeurs["name"]
+        rate = float(valeurs["hourly_rate"].replace(",", ".") or 0)
         self.db.add_client(name, self.client_email_var.get().strip(), self.client_address_var.get().strip(), rate)
         self.client_name_var.set("")
         self.client_email_var.set("")
@@ -630,7 +688,9 @@ class TempoFactureApp:
     def _toggle_client_archived(self):
         selection = self.clients_tree.selection()
         if not selection:
-            messagebox.showinfo(APP_TITLE, "Selectionnez un client d'abord.")
+            self.statut.dire(
+                "Selectionnez un client d'abord.",
+                ton="alerte")
             return
         client_id = int(selection[0])
         client = self.db.get_client(client_id)
@@ -664,7 +724,8 @@ class TempoFactureApp:
         self._refresh_timer_project_choices()
         self._refresh_invoices()
 
-    def _prompt_client_fields(self, title: str, initial_name: str, initial_email: str, initial_address: str, initial_rate):
+    def _prompt_client_fields(self, title: str, initial_name: str, initial_email: str,
+                              initial_address: str, initial_rate, valider=None):
         """Petit dialogue (nom, email, adresse, taux horaire) - renvoie un
         dict de chaines brutes (non validees) ou None si annule. Meme
         pattern que _prompt_time_entry_fields, reutilise ici pour l'edition
@@ -684,27 +745,44 @@ class TempoFactureApp:
         result = {}
 
         ttk.Label(dialog, text="Nom").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
-        ttk.Entry(dialog, textvariable=name_var, width=30).grid(row=0, column=1, padx=10, pady=(10, 5))
+        name_entry = ttk.Entry(dialog, textvariable=name_var, width=30)
+        name_entry.grid(row=0, column=1, padx=10, pady=(10, 5))
         ttk.Label(dialog, text="Email").grid(row=1, column=0, sticky="w", padx=10)
         ttk.Entry(dialog, textvariable=email_var, width=30).grid(row=1, column=1, padx=10)
         ttk.Label(dialog, text="Adresse").grid(row=2, column=0, sticky="w", padx=10)
         ttk.Entry(dialog, textvariable=address_var, width=30).grid(row=2, column=1, padx=10)
         ttk.Label(dialog, text="Taux horaire").grid(row=3, column=0, sticky="w", padx=10)
-        ttk.Entry(dialog, textvariable=rate_var, width=30).grid(row=3, column=1, padx=10, pady=(0, 10))
+        rate_entry = ttk.Entry(dialog, textvariable=rate_var, width=30)
+        rate_entry.grid(row=3, column=1, padx=10, pady=(0, 10))
+
+        # Ce dialogue est en `grid` : l'erreur vit dans une porte, sinon son
+        # `pack()` interne entre en conflit avec le gestionnaire du parent.
+        porte = ttk.Frame(dialog)
+        porte.grid(row=4, column=0, columnspan=2, sticky="we")
+        erreur = opl_theme.Erreur(porte)
+        champs = {"name": name_entry, "hourly_rate": rate_entry}
         ttk.Label(
             dialog, text="Le nouveau taux ne s'applique qu'aux futures factures :\nles factures deja emises gardent leur montant d'origine.",
             foreground=opl_theme.couleur("texte_doux"), justify=LEFT,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
         def on_ok():
-            result["name"] = name_var.get().strip()
-            result["email"] = email_var.get().strip()
-            result["address"] = address_var.get().strip()
-            result["hourly_rate"] = rate_var.get().strip()
+            erreur.effacer()
+            valeurs = {"name": name_var.get().strip(), "email": email_var.get().strip(),
+                       "address": address_var.get().strip(), "hourly_rate": rate_var.get().strip()}
+            if valider is not None:
+                faute = valider(valeurs)
+                if faute:
+                    # Le dialogue RESTE ouvert : la saisie est conservee et
+                    # l'erreur se montre a cote du champ a corriger.
+                    cle, quoi, texte = faute
+                    erreur.montrer(quoi, texte, champ=champs.get(cle))
+                    return
+            result.update(valeurs)
             dialog.destroy()
 
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=5, column=0, columnspan=2, pady=(0, 10))
+        buttons.grid(row=6, column=0, columnspan=2, pady=(0, 10))
         ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
@@ -737,21 +815,14 @@ class TempoFactureApp:
         if client is None:
             return
         result = self._prompt_client_fields(
-            "Modifier le client", client["name"], client["email"], client["address"], client["hourly_rate"]
+            "Modifier le client", client["name"], client["email"], client["address"],
+            client["hourly_rate"], valider=valider_client,
         )
         if result is None:
             return
-        if not result["name"]:
-            messagebox.showwarning(APP_TITLE, "Le nom du client est obligatoire.")
-            return
-        try:
-            rate = float(result["hourly_rate"].replace(",", ".") or 0)
-        except ValueError:
-            messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
-            return
-        if rate < 0:
-            messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
-            return
+        # La saisie a deja franchi `valider_client` DANS le dialogue : ce qui
+        # sort d'ici est valide par construction.
+        rate = float(result["hourly_rate"].replace(",", ".") or 0)
         self.db.update_client(
             client_id, name=result["name"], email=result["email"], address=result["address"], hourly_rate=rate
         )
@@ -786,6 +857,9 @@ class TempoFactureApp:
         ttk.Button(form, text="Ajouter le projet", command=self._add_project).grid(row=0, column=6, padx=5)
         # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
         # a l'audit, voir E2) : soumission du formulaire au clavier.
+        # Les erreurs de saisie restent SOUS le formulaire, a cote des champs
+        # dont elles parlent (voir _build_clients_tab).
+        self.project_erreur = opl_theme.Erreur(frame, apres=form)
         for entry in (self.project_name_entry, self.project_rate_entry):
             entry.bind("<Return>", lambda event: self._add_project())
 
@@ -820,22 +894,21 @@ class TempoFactureApp:
         )
 
     def _add_project(self):
+        self.project_erreur.effacer()
         client_id = self._parse_id(self.project_client_var.get())
         name = self.project_name_var.get().strip()
-        if client_id is None or not name:
-            messagebox.showwarning(APP_TITLE, "Choisissez un client et un nom de projet.")
+        if client_id is None:
+            self.project_erreur.montrer(
+                "Client", "un projet appartient a un client : choisissez-le dans la liste.",
+                champ=self.project_client_combo)
             return
-        rate_text = self.project_rate_var.get().strip().replace(",", ".")
-        rate = None
-        if rate_text:
-            try:
-                rate = float(rate_text)
-            except ValueError:
-                messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
-                return
-            if rate < 0:
-                messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
-                return
+        valeurs = {"name": name, "hourly_rate": self.project_rate_var.get().strip()}
+        if not self._signaler(self.project_erreur, valider_projet(valeurs),
+                              {"name": self.project_name_entry,
+                               "hourly_rate": self.project_rate_entry}):
+            return
+        rate_text = valeurs["hourly_rate"].replace(",", ".")
+        rate = float(rate_text) if rate_text else None
         self.db.add_project(client_id, name, hourly_rate=rate)
         self.project_name_var.set("")
         self.project_rate_var.set("")
@@ -892,7 +965,9 @@ class TempoFactureApp:
     def _toggle_project_archived(self):
         selection = self.projects_tree.selection()
         if not selection:
-            messagebox.showinfo(APP_TITLE, "Selectionnez un projet d'abord.")
+            self.statut.dire(
+                "Selectionnez un projet d'abord.",
+                ton="alerte")
             return
         project_id = int(selection[0])
         project = self.db.get_project(project_id)
@@ -900,7 +975,7 @@ class TempoFactureApp:
         self._refresh_projects()
         self._refresh_timer_project_choices()
 
-    def _prompt_project_fields(self, title: str, initial_name: str, initial_rate):
+    def _prompt_project_fields(self, title: str, initial_name: str, initial_rate, valider=None):
         """Petit dialogue (nom, taux horaire optionnel) - renvoie un dict de
         chaines brutes (non validees) ou None si annule. initial_rate peut
         etre None (le projet herite alors du taux de son client) ; laisser
@@ -918,17 +993,31 @@ class TempoFactureApp:
         result = {}
 
         ttk.Label(dialog, text="Nom du projet").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
-        ttk.Entry(dialog, textvariable=name_var, width=30).grid(row=0, column=1, padx=10, pady=(10, 5))
+        name_entry = ttk.Entry(dialog, textvariable=name_var, width=30)
+        name_entry.grid(row=0, column=1, padx=10, pady=(10, 5))
         ttk.Label(dialog, text="Taux horaire (vide = taux du client)").grid(row=1, column=0, sticky="w", padx=10)
-        ttk.Entry(dialog, textvariable=rate_var, width=30).grid(row=1, column=1, padx=10, pady=(0, 10))
+        rate_entry = ttk.Entry(dialog, textvariable=rate_var, width=30)
+        rate_entry.grid(row=1, column=1, padx=10, pady=(0, 10))
+
+        porte = ttk.Frame(dialog)                 # voir _prompt_client_fields
+        porte.grid(row=2, column=0, columnspan=2, sticky="we")
+        erreur = opl_theme.Erreur(porte)
+        champs = {"name": name_entry, "hourly_rate": rate_entry}
 
         def on_ok():
-            result["name"] = name_var.get().strip()
-            result["hourly_rate"] = rate_var.get().strip()
+            erreur.effacer()
+            valeurs = {"name": name_var.get().strip(), "hourly_rate": rate_var.get().strip()}
+            if valider is not None:
+                faute = valider(valeurs)
+                if faute:
+                    cle, quoi, texte = faute
+                    erreur.montrer(quoi, texte, champ=champs.get(cle))
+                    return
+            result.update(valeurs)
             dialog.destroy()
 
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=2, column=0, columnspan=2, pady=(0, 10))
+        buttons.grid(row=3, column=0, columnspan=2, pady=(0, 10))
         ttk.Button(buttons, text="Enregistrer", command=on_ok).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
@@ -953,24 +1042,14 @@ class TempoFactureApp:
         project = self.db.get_project(project_id)
         if project is None:
             return
-        result = self._prompt_project_fields("Modifier le projet", project["name"], project["hourly_rate"])
+        result = self._prompt_project_fields("Modifier le projet", project["name"],
+                                            project["hourly_rate"], valider=valider_projet)
         if result is None:
             return
+        # Valide par construction : voir _edit_client.
         name = result["name"]
-        if not name:
-            messagebox.showwarning(APP_TITLE, "Le nom du projet est obligatoire.")
-            return
         rate_text = result["hourly_rate"].replace(",", ".")
-        rate = None
-        if rate_text:
-            try:
-                rate = float(rate_text)
-            except ValueError:
-                messagebox.showwarning(APP_TITLE, "Le taux horaire doit etre un nombre.")
-                return
-            if rate < 0:
-                messagebox.showwarning(APP_TITLE, "Le taux horaire ne peut pas etre negatif.")
-                return
+        rate = float(rate_text) if rate_text else None
         # rate=None remet explicitement le projet en heritage du taux de
         # son client (meme semantique qu'a la creation, voir _add_project) :
         # utile pour annuler un taux specifique saisi par erreur.
@@ -994,6 +1073,8 @@ class TempoFactureApp:
         self.timer_project_combo.pack(side=LEFT, padx=5)
         ttk.Label(top, text="Description").pack(side=LEFT, padx=(10, 0))
         ttk.Entry(top, textvariable=self.timer_description_var, width=35).pack(side=LEFT, padx=5)
+
+        self.timer_erreur = opl_theme.Erreur(frame, apres=top)
 
         self.timer_display_var = StringVar(value="00:00:00")
         display = ttk.Label(frame, textvariable=self.timer_display_var, font=("Segoe UI", 42, "bold"))
@@ -1030,6 +1111,7 @@ class TempoFactureApp:
         ttk.Button(manual, text="Ajouter au projet selectionne", command=self._add_manual_entry).pack(side=LEFT, padx=10)
         # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
         # a l'audit, voir E2).
+        self.manual_erreur = opl_theme.Erreur(frame, apres=manual)
         for entry in (self.manual_date_entry, self.manual_hours_entry):
             entry.bind("<Return>", lambda event: self._add_manual_entry())
 
@@ -1134,9 +1216,12 @@ class TempoFactureApp:
     def _start_timer(self):
         if self.timer.is_running:
             return
+        self.timer_erreur.effacer()
         project_id = self._parse_id(self.timer_project_var.get())
         if project_id is None:
-            messagebox.showwarning(APP_TITLE, "Choisissez un projet avant de demarrer le chronometre.")
+            self.timer_erreur.montrer(
+                "Projet", "choisissez le projet a chronometrer : le temps doit etre impute quelque part.",
+                champ=self.timer_project_combo)
             return
         self.timer.start(project_id, self.timer_description_var.get().strip())
         self.timer_start_button.config(state="disabled")
@@ -1264,18 +1349,18 @@ class TempoFactureApp:
         self.root.after(IDLE_CHECK_INTERVAL_MS, self._check_idle)
 
     def _add_manual_entry(self):
+        self.manual_erreur.effacer()
         project_id = self._parse_id(self.timer_project_var.get())
         if project_id is None:
-            messagebox.showwarning(APP_TITLE, "Choisissez un projet.")
+            self.manual_erreur.montrer(
+                "Projet", "choisissez le projet auquel imputer ces heures, en haut de cette vue.",
+                champ=self.timer_project_combo)
             return
-        try:
-            hours = float(self.manual_hours_var.get().replace(",", "."))
-        except ValueError:
-            messagebox.showwarning(APP_TITLE, "Entrez un nombre d'heures valide.")
+        valeurs = {"hours": self.manual_hours_var.get().strip()}
+        if not self._signaler(self.manual_erreur, valider_heures(valeurs),
+                              {"hours": self.manual_hours_entry}):
             return
-        if hours <= 0:
-            messagebox.showwarning(APP_TITLE, "Le nombre d'heures doit etre positif.")
-            return
+        hours = float(valeurs["hours"].replace(",", "."))
         if hours > 24:
             if not opl_theme.dialogue(
                 self.root, "Duree inhabituelle",
@@ -1301,7 +1386,7 @@ class TempoFactureApp:
 
     def _prompt_time_entry_fields(
         self, title: str, initial_hours: str, initial_description: str,
-        current_project_id=None, project_choices=None,
+        current_project_id=None, project_choices=None, valider=None,
     ):
         """Petit dialogue (heures, description, et optionnellement projet) -
         renvoie un dict ou None si annule. project_choices (liste de
@@ -1339,13 +1424,26 @@ class TempoFactureApp:
             row += 1
 
         ttk.Label(dialog, text="Heures").grid(row=row, column=0, sticky="w", padx=10, pady=(10 if row == 0 else 0, 5))
-        ttk.Entry(dialog, textvariable=hours_var, width=15).grid(row=row, column=1, padx=10, pady=(10 if row == 0 else 0, 5))
+        hours_entry = ttk.Entry(dialog, textvariable=hours_var, width=15)
+        hours_entry.grid(row=row, column=1, padx=10, pady=(10 if row == 0 else 0, 5))
         row += 1
         ttk.Label(dialog, text="Description").grid(row=row, column=0, sticky="w", padx=10)
         ttk.Entry(dialog, textvariable=desc_var, width=30).grid(row=row, column=1, padx=10, pady=(0, 10))
         row += 1
 
+        porte = ttk.Frame(dialog)                 # voir _prompt_client_fields
+        porte.grid(row=row + 1, column=0, columnspan=2, sticky="we")
+        erreur = opl_theme.Erreur(porte)
+        row += 1
+
         def on_ok():
+            erreur.effacer()
+            if valider is not None:
+                faute = valider({"hours": hours_var.get().strip()})
+                if faute:
+                    _cle, quoi, texte = faute
+                    erreur.montrer(quoi, texte, champ=hours_entry)
+                    return
             result["hours"] = hours_var.get().strip()
             result["description"] = desc_var.get().strip()
             if project_var is not None:
@@ -1390,17 +1488,12 @@ class TempoFactureApp:
         result = self._prompt_time_entry_fields(
             "Modifier l'entree de temps", f"{current_hours:.2f}", entry["description"],
             current_project_id=entry["project_id"], project_choices=project_choices,
+            valider=valider_heures,
         )
         if result is None:
             return
-        try:
-            hours = float(result["hours"].replace(",", "."))
-        except ValueError:
-            messagebox.showwarning(APP_TITLE, "Entrez un nombre d'heures valide.")
-            return
-        if hours <= 0:
-            messagebox.showwarning(APP_TITLE, "Le nombre d'heures doit etre positif.")
-            return
+        # Valide par construction : voir _edit_client.
+        hours = float(result["hours"].replace(",", "."))
 
         update_kwargs = {"description": result["description"]}
         # N'envoyer start_time/end_time que si les heures ont reellement ete
@@ -1428,7 +1521,8 @@ class TempoFactureApp:
         try:
             self.db.update_time_entry(entry_id, **update_kwargs)
         except ValueError as exc:
-            messagebox.showwarning(APP_TITLE, str(exc))
+            # Meme refus metier que dans _delete_time_entry.
+            opl_theme.message(self.root, "Modification refusee", str(exc), ton="alerte")
             return
         self._refresh_time_entries()
         self._refresh_invoices()
@@ -1436,7 +1530,9 @@ class TempoFactureApp:
     def _delete_time_entry(self):
         selection = self.entries_tree.selection()
         if not selection:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une entree d'abord.")
+            self.statut.dire(
+                "Selectionnez une entree d'abord.",
+                ton="alerte")
             return
         entry_id = int(selection[0])
         if not opl_theme.dialogue(
@@ -1447,7 +1543,10 @@ class TempoFactureApp:
         try:
             self.db.delete_time_entry(entry_id)
         except ValueError as exc:
-            messagebox.showwarning(APP_TITLE, str(exc))
+            # Refus METIER (entree deja facturee), pas une erreur de saisie :
+            # aucun champ n'est fautif et l'utilisateur doit lire pourquoi son
+            # action n'a pas eu lieu.
+            opl_theme.message(self.root, "Suppression refusee", str(exc), ton="alerte")
             return
         self._refresh_time_entries()
         self._refresh_invoices()
@@ -1469,6 +1568,7 @@ class TempoFactureApp:
         ttk.Label(top, text="TVA (%)").pack(side=LEFT, padx=(10, 0))
         self.invoice_tax_entry = ttk.Entry(top, textvariable=self.invoice_tax_var, width=6)
         self.invoice_tax_entry.pack(side=LEFT, padx=5)
+        self.invoice_erreur = opl_theme.Erreur(frame, apres=top)
         ttk.Button(top, text="Generer la facture (PDF)", command=self._generate_invoice).pack(side=LEFT, padx=10)
         # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
         # a l'audit, voir E2) : Entree dans le champ TVA declenche la meme
@@ -1600,7 +1700,9 @@ class TempoFactureApp:
     def _save_note_template(self):
         text = self.invoice_notes_var.get().strip()
         if not text:
-            messagebox.showinfo(APP_TITLE, "Saisissez d'abord un texte de note a enregistrer comme modele.")
+            self.statut.dire(
+                "Saisissez d'abord un texte de note a enregistrer comme modele.",
+                ton="alerte")
             return
         name = simpledialog.askstring(APP_TITLE, "Nom du modele :", parent=self.root)
         if not name or not name.strip():
@@ -1612,7 +1714,9 @@ class TempoFactureApp:
     def _delete_note_template(self):
         name = self.note_template_var.get()
         if not name:
-            messagebox.showinfo(APP_TITLE, "Selectionnez d'abord un modele dans la liste.")
+            self.statut.dire(
+                "Selectionnez d'abord un modele dans la liste.",
+                ton="alerte")
             return
         if not opl_theme.dialogue(
             self.root, "Supprimer un modele de note",
@@ -1778,17 +1882,27 @@ class TempoFactureApp:
         return True
 
     def _generate_invoice(self):
+        self.invoice_erreur.effacer()
         client_id = self._parse_id(self.invoice_client_var.get())
         if client_id is None:
-            messagebox.showwarning(APP_TITLE, "Choisissez un client.")
+            self.invoice_erreur.montrer(
+                "Client", "une facture est adressee a quelqu'un : choisissez-le dans la liste.",
+                champ=self.invoice_client_combo)
             return
+        brut_tva = self.invoice_tax_var.get().strip()
         try:
-            tax_rate = float(self.invoice_tax_var.get().replace(",", ".") or 0)
+            tax_rate = float(brut_tva.replace(",", ".") or 0)
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "Le taux de TVA doit etre un nombre.")
+            self.invoice_erreur.montrer(
+                "Taux de TVA",
+                f"« {brut_tva} » n'est pas un nombre. Un pourcentage, comme 20 ou 5,5. "
+                "Laissez 0 si vous n'y etes pas assujetti.",
+                champ=self.invoice_tax_entry)
             return
         if tax_rate < 0:
-            messagebox.showwarning(APP_TITLE, "Le taux de TVA ne peut pas etre negatif.")
+            self.invoice_erreur.montrer(
+                "Taux de TVA", "un taux ne peut pas etre negatif. Laissez 0 en cas d'exoneration.",
+                champ=self.invoice_tax_entry)
             return
         if tax_rate > 100:
             # Aucune borne superieure n'existait auparavant (contrairement
@@ -1869,7 +1983,9 @@ class TempoFactureApp:
     def _set_invoice_status(self, status: str):
         invoice_id = self._selected_invoice_id()
         if invoice_id is None:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une facture d'abord.")
+            self.statut.dire(
+                "Selectionnez une facture d'abord.",
+                ton="alerte")
             return
         self.db.set_invoice_status(invoice_id, status)
         self._refresh_invoices()
@@ -1877,7 +1993,9 @@ class TempoFactureApp:
     def _delete_invoice(self):
         invoice_id = self._selected_invoice_id()
         if invoice_id is None:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une facture d'abord.")
+            self.statut.dire(
+                "Selectionnez une facture d'abord.",
+                ton="alerte")
             return
         invoice = self.db.get_invoice(invoice_id)
         if invoice is None:
@@ -1923,7 +2041,9 @@ class TempoFactureApp:
         consommee - les lignes sont simplement recopiees telles quelles."""
         invoice_id = self._selected_invoice_id()
         if invoice_id is None:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une facture a dupliquer d'abord.")
+            self.statut.dire(
+                "Selectionnez une facture a dupliquer d'abord.",
+                ton="alerte")
             return
         source_invoice = self.db.get_invoice(invoice_id)
         if source_invoice is None:
@@ -1995,7 +2115,9 @@ class TempoFactureApp:
     def _reexport_invoice_pdf(self):
         invoice_id = self._selected_invoice_id()
         if invoice_id is None:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une facture d'abord.")
+            self.statut.dire(
+                "Selectionnez une facture d'abord.",
+                ton="alerte")
             return
         invoice = self.db.get_invoice(invoice_id)
         if invoice is None:
@@ -2086,6 +2208,8 @@ class TempoFactureApp:
         ttk.Label(form, text="Seuil d'inactivite du chronometre (minutes)").grid(row=4, column=0, sticky="w", pady=5)
         self.settings_idle_threshold_entry = ttk.Entry(form, textvariable=self.setting_idle_threshold_var, width=10)
         self.settings_idle_threshold_entry.grid(row=4, column=1, sticky="w", padx=5)
+
+        self.settings_erreur = opl_theme.Erreur(frame, apres=form)
         ttk.Checkbutton(
             form, text="Verifier les mises a jour au demarrage (seule activite reseau de l'application)",
             variable=self.setting_check_updates_var,
@@ -2157,25 +2281,40 @@ class TempoFactureApp:
         os.startfile(_data_dir())  # nosec - ouverture Explorateur Windows d'un dossier local
 
     def _save_settings(self):
+        self.settings_erreur.effacer()
+        brut_delai = self.setting_payment_terms_var.get().strip()
         try:
-            payment_terms = int(self.setting_payment_terms_var.get().strip() or 0)
+            payment_terms = int(brut_delai or 0)
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "Le delai de paiement doit etre un nombre entier de jours.")
+            self.settings_erreur.montrer(
+                "Delai de paiement",
+                f"« {brut_delai} » n'est pas un nombre entier de jours. Par exemple 30.",
+                champ=self.settings_payment_terms_entry)
             return
         if payment_terms < 0:
-            messagebox.showwarning(APP_TITLE, "Le delai de paiement ne peut pas etre negatif.")
+            self.settings_erreur.montrer(
+                "Delai de paiement", "un delai ne peut pas etre negatif. Mettez 0 pour un paiement comptant.",
+                champ=self.settings_payment_terms_entry)
             return
         currency = self.setting_currency_var.get().strip().upper()
         if not currency:
-            messagebox.showwarning(APP_TITLE, "La devise ne peut pas etre vide.")
+            self.settings_erreur.montrer(
+                "Devise", "indiquez un code de devise, comme EUR, USD ou CHF.",
+                champ=self.settings_currency_entry)
             return
+        brut_seuil = self.setting_idle_threshold_var.get().strip()
         try:
-            idle_threshold_minutes = int(self.setting_idle_threshold_var.get().strip() or 0)
+            idle_threshold_minutes = int(brut_seuil or 0)
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "Le seuil d'inactivite doit etre un nombre entier de minutes.")
+            self.settings_erreur.montrer(
+                "Seuil d'inactivite",
+                f"« {brut_seuil} » n'est pas un nombre entier de minutes. Par exemple 10.",
+                champ=self.settings_idle_threshold_entry)
             return
         if idle_threshold_minutes < 1:
-            messagebox.showwarning(APP_TITLE, "Le seuil d'inactivite doit etre d'au moins 1 minute.")
+            self.settings_erreur.montrer(
+                "Seuil d'inactivite", "au moins 1 minute, sinon le chronometre se croirait inactif en permanence.",
+                champ=self.settings_idle_threshold_entry)
             return
         self.db.set_setting("company_name", self.setting_company_name_var.get().strip())
         self.db.set_setting("company_info", self.setting_company_info_var.get().strip())

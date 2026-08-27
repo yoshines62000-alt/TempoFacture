@@ -47,6 +47,17 @@ def tearDownModule():
 # ----------------------------------------------------------------------------
 
 
+def _trouver(widget, predicat):
+    """Le premier descendant (widget compris) qui satisfait `predicat`."""
+    if predicat(widget):
+        return widget
+    for enfant in widget.winfo_children():
+        trouve = _trouver(enfant, predicat)
+        if trouve is not None:
+            return trouve
+    return None
+
+
 class GuiSmokeTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -184,16 +195,72 @@ class GuiSmokeTestCase(unittest.TestCase):
         with patch("tkinter.messagebox.showwarning") as showwarning:
             self.app._save_settings()
 
-        showwarning.assert_called_once()
+        self.assertTrue(self.app.settings_erreur.visible)
         # La valeur invalide n'a pas ete persistee.
         self.assertEqual(self.app.db.get_setting("idle_threshold_minutes"), "")
 
     def test_saving_settings_rejects_non_numeric_idle_threshold(self):
         self.app.setting_idle_threshold_var.set("abc")
-        with patch("tkinter.messagebox.showwarning") as showwarning:
-            self.app._save_settings()
+        self.app._save_settings()
 
-        showwarning.assert_called_once()
+        # L'erreur reste dans la vue, sous le champ, et le nomme.
+        self.assertTrue(self.app.settings_erreur.visible)
+        self.assertIn("abc", self.app.settings_erreur.texte)
+
+    # -- la validation vit DANS le dialogue, plus apres sa fermeture ---------
+
+    def _dialogue_client(self, taux):
+        """Ouvre le dialogue de modification, saisit `taux`, clique
+        « Enregistrer », et rend (dialogue, erreur, resultat)."""
+        vu = {}
+
+        def agir():
+            fenetre = [w for w in self.root.winfo_children()
+                       if isinstance(w, tkinter.Toplevel)][-1]
+            champs = []
+
+            def collecte(w):
+                if w.winfo_class() == "TEntry":
+                    champs.append(w)
+                for e in w.winfo_children():
+                    collecte(e)
+
+            collecte(fenetre)
+            champs[0].insert(0, "Un client")
+            champs[3].delete(0, "end")
+            champs[3].insert(0, taux)
+            bouton = _trouver(fenetre, lambda w: w.winfo_class() == "TButton"
+                              and "Enregistrer" in str(w.cget("text")))
+            bouton.invoke()
+            vu["ouvert"] = bool(fenetre.winfo_exists())
+            vu["erreur"] = _trouver(fenetre, lambda w: isinstance(w, gui.opl_theme.Erreur))
+            vu["texte"] = vu["erreur"].texte if vu["erreur"] is not None else ""
+            if fenetre.winfo_exists():
+                fenetre.destroy()
+
+        self.root.after(200, agir)
+        resultat = self.app._prompt_client_fields(
+            "Modifier le client", "", "", "", 0, valider=gui.valider_client)
+        return vu, resultat
+
+    def test_a_bad_rate_keeps_the_client_dialog_open_with_the_error_beside_the_field(self):
+        vu, resultat = self._dialogue_client("abc")
+
+        # Le dialogue N'EST PAS ferme : la saisie deja faite est conservee, et
+        # l'erreur se lit a cote du champ a corriger. Avant, il se refermait
+        # et la modale d'erreur arrivait sur une fenetre disparue — corriger
+        # imposait de tout retaper.
+        self.assertTrue(vu["ouvert"])
+        self.assertIn("abc", vu["texte"])
+        self.assertIsNone(resultat)
+
+    def test_a_valid_rate_closes_the_client_dialog_and_returns_the_values(self):
+        # La contre-epreuve : sans elle, un validateur qui refuserait TOUT
+        # ferait passer le test ci-dessus.
+        vu, resultat = self._dialogue_client("65,50")
+
+        self.assertFalse(vu["ouvert"])
+        self.assertEqual(resultat["hourly_rate"], "65,50")
 
     # -- item 5 : recherche/filtre sur les listes -----------------------------
 
@@ -495,7 +562,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         with patch.object(
             self.app, "_prompt_time_entry_fields",
             return_value={"hours": "1.00", "description": "", "project_id": other_project},
-        ), patch("tkinter.messagebox.showwarning") as mock_warn:
+        ), patch.object(gui.opl_theme, "message") as mock_warn:
             self.app.entries_tree.selection_set(str(entry_id))
             self.app._edit_time_entry()
 
