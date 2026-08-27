@@ -1372,7 +1372,11 @@ class TempoFactureApp:
         try:
             target_date = _date.fromisoformat(self.manual_date_var.get().strip())
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "La date de fin doit etre au format AAAA-MM-JJ.")
+            self.manual_erreur.montrer(
+                "Date de fin",
+                f"« {self.manual_date_var.get().strip()} » n'est pas une date. "
+                "Le format attendu est AAAA-MM-JJ, par exemple 2026-08-27.",
+                champ=self.manual_date_entry)
             return
         # Conserve l'heure actuelle mais sur la date choisie : permet de
         # saisir "3 heures faites hier" sans avoir a viser une heure precise.
@@ -1472,7 +1476,9 @@ class TempoFactureApp:
         if entry is None:
             return
         if entry["end_time"] is None:
-            messagebox.showinfo(APP_TITLE, "Le chronometre en cours ne peut pas etre modifie ici ; arretez-le d'abord.")
+            self.statut.dire(
+                "Le chronometre tourne encore sur cette entree : arretez-le pour la modifier.",
+                ton="alerte")
             return
 
         from invoice import compute_duration_hours
@@ -1922,7 +1928,9 @@ class TempoFactureApp:
                 return
         entries = self.db.list_time_entries(client_id=client_id, uninvoiced_only=True)
         if not entries:
-            messagebox.showinfo(APP_TITLE, "Aucune heure non facturee pour ce client.")
+            self.statut.dire(
+                "Aucune heure non facturee pour ce client : rien a facturer.",
+                ton="info")
             return
         client = self.db.get_client(client_id)
         line_items = build_line_items(entries, self.db)
@@ -2001,7 +2009,10 @@ class TempoFactureApp:
         if invoice is None:
             # Facture supprimee entre son affichage dans la liste et ce clic
             # (meme garde-fou que _reexport_invoice_pdf/_duplicate_invoice).
-            messagebox.showwarning(APP_TITLE, "Cette facture n'existe plus.")
+            self.statut.dire(
+                "Cette facture n'existe plus : la liste vient d'etre rafraichie.",
+                ton="alerte")
+            self._refresh_invoices()
             return
         # Contrairement a "Marquer annulee" (qui conserve la facture et son
         # numero dans l'historique), supprimer efface definitivement la
@@ -2051,7 +2062,10 @@ class TempoFactureApp:
             # (facture supprimee entre l'affichage de la liste et ce clic) :
             # peu probable en usage normal, mais moins cher a verifier
             # explicitement que d'en debattre.
-            messagebox.showwarning(APP_TITLE, "Cette facture n'existe plus.")
+            self.statut.dire(
+                "Cette facture n'existe plus : la liste vient d'etre rafraichie.",
+                ton="alerte")
+            self._refresh_invoices()
             return
         stored_items = self.db.get_invoice_line_items(invoice_id)
         if not stored_items:
@@ -2130,7 +2144,10 @@ class TempoFactureApp:
             # clair (reexport_invoice_pdf, lui, gere deja proprement ce cas
             # via un ValueError, mais on ne l'atteint jamais : le plantage
             # a lieu avant, en construisant le nom de fichier par defaut).
-            messagebox.showwarning(APP_TITLE, "Cette facture n'existe plus.")
+            self.statut.dire(
+                "Cette facture n'existe plus : la liste vient d'etre rafraichie.",
+                ton="alerte")
+            self._refresh_invoices()
             return
 
         from tkinter import filedialog
