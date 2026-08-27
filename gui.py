@@ -162,7 +162,6 @@ class TempoFactureApp:
             except Exception:
                 pass
 
-        opl_theme.entete(self.root, "TempoFacture", "Suivi du temps et facturation", on_contact=lambda: opl_contact.ouvrir(self.root, app="TempoFacture", version=APP_VERSION), slug="tempofacture", version=APP_VERSION).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
@@ -177,7 +176,12 @@ class TempoFactureApp:
         self._update_check_queue = queue.Queue()
         self._maybe_start_update_check()
 
-        notebook = opl_theme.Rail(self.root)
+        # UNE SEULE COLONNE a gauche : entete() rend le rail lui-meme —
+        # marque en haut, vues au milieu, Theme et Aide en bas.
+        notebook = opl_theme.entete(
+            self.root, "TempoFacture", "Suivi du temps et facturation",
+            on_contact=lambda: opl_contact.ouvrir(self.root, app="TempoFacture", version=APP_VERSION),
+            slug="tempofacture", version=APP_VERSION)
         notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
         self.notebook = notebook
 
