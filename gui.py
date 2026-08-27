@@ -633,13 +633,13 @@ class TempoFactureApp:
             if uninvoiced:
                 count = len(uninvoiced)
                 plural = "s" if count > 1 else ""
-                if not messagebox.askyesno(
-                    APP_TITLE,
+                if not opl_theme.dialogue(
+                    self.root, "Archiver un client aux heures non facturees",
                     f"Ce client a {count} heure{plural} non facturee{plural}.\n"
                     "Une fois archive, il n'apparaitra plus dans l'onglet Factures et ces heures "
                     "resteront invisibles tant qu'il n'est pas desarchive.\n\n"
                     "Archiver quand meme ?",
-                ):
+                    confirmer="Archiver le client", danger=True):
                     return
         self.db.update_client(client_id, archived=1 if archiving else 0)
         self._refresh_clients()
@@ -1170,8 +1170,8 @@ class TempoFactureApp:
         offline_gap = self._offline_gap_seconds(elapsed)
         if offline_gap > 0:
             minutes = int(offline_gap // 60)
-            remove = messagebox.askyesno(
-                APP_TITLE,
+            remove = opl_theme.dialogue(
+                self.root, "Chronometre laisse en cours",
                 "Le chronometre etait toujours en cours au dernier arret de "
                 "l'ordinateur : une extinction complete (pas une simple "
                 f"fermeture de l'application) d'environ {minutes} minute(s) "
@@ -1180,7 +1180,7 @@ class TempoFactureApp:
                 "(vous pourrez toujours affiner l'heure de debut ensuite, "
                 "via un double-clic sur l'entree en cours dans le tableau "
                 "des heures)",
-            )
+                confirmer="Retirer ce temps")
             if remove:
                 started = started + timedelta(seconds=offline_gap)
                 self.db.update_time_entry(running["id"], start_time=started.isoformat())
@@ -1226,11 +1226,11 @@ class TempoFactureApp:
             if idle >= self._idle_threshold_seconds():
                 self._idle_prompt_open = True
                 minutes = int(idle // 60)
-                answer = messagebox.askyesno(
-                    APP_TITLE,
+                answer = opl_theme.dialogue(
+                    self.root, "Inactivite detectee",
                     f"Vous semblez inactif depuis environ {minutes} minute(s).\n"
                     "Retirer ce temps d'inactivite du chronometre en cours ?",
-                )
+                    confirmer="Retirer ce temps")
                 if answer:
                     self.timer.stop_removing_idle_time(idle)
                     self.timer_start_button.config(state="normal")
@@ -1256,11 +1256,11 @@ class TempoFactureApp:
             messagebox.showwarning(APP_TITLE, "Le nombre d'heures doit etre positif.")
             return
         if hours > 24:
-            if not messagebox.askyesno(
-                APP_TITLE,
+            if not opl_theme.dialogue(
+                self.root, "Duree inhabituelle",
                 f"{hours:g} heures en une seule entree, c'est inhabituel (plus d'une journee complete).\n"
                 "Confirmez-vous que ce nombre est correct ?",
-            ):
+                confirmer="Confirmer cette duree"):
                 return
         from datetime import date as _date, datetime, timedelta, timezone
         try:
@@ -1418,7 +1418,10 @@ class TempoFactureApp:
             messagebox.showinfo(APP_TITLE, "Selectionnez une entree d'abord.")
             return
         entry_id = int(selection[0])
-        if not messagebox.askyesno(APP_TITLE, "Supprimer cette entree de temps ?"):
+        if not opl_theme.dialogue(
+            self.root, "Supprimer une entree de temps",
+            "Supprimer cette entree de temps ?",
+            confirmer="Supprimer l'entree", danger=True):
             return
         try:
             self.db.delete_time_entry(entry_id)
@@ -1590,7 +1593,10 @@ class TempoFactureApp:
         if not name:
             messagebox.showinfo(APP_TITLE, "Selectionnez d'abord un modele dans la liste.")
             return
-        if not messagebox.askyesno(APP_TITLE, f"Supprimer le modele de note '{name}' ?"):
+        if not opl_theme.dialogue(
+            self.root, "Supprimer un modele de note",
+            f"Supprimer le modele de note '{name}' ?",
+            confirmer="Supprimer le modele", danger=True):
             return
         self.db.delete_note_template(name)
         self.note_template_var.set("")
@@ -1766,11 +1772,11 @@ class TempoFactureApp:
             # on n'empeche rien (un taux > 100% reste legal dans de rares
             # cas), on demande juste de confirmer que ce n'est pas une
             # faute de frappe.
-            if not messagebox.askyesno(
-                APP_TITLE,
+            if not opl_theme.dialogue(
+                self.root, "Taux de TVA inhabituel",
                 f"Un taux de TVA de {tax_rate:g} % est inhabituel (superieur a 100 %).\n"
                 "Confirmez-vous que ce taux est correct ?",
-            ):
+                confirmer="Confirmer ce taux"):
                 return
         entries = self.db.list_time_entries(client_id=client_id, uninvoiced_only=True)
         if not entries:
@@ -1819,7 +1825,10 @@ class TempoFactureApp:
         self.note_template_var.set("")
         self._refresh_invoices()
         self._refresh_time_entries()
-        if messagebox.askyesno(APP_TITLE, f"Facture {invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?"):
+        if opl_theme.dialogue(
+            self.root, "Facture generee",
+            f"Facture {invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?",
+            confirmer="Ouvrir le PDF"):
             webbrowser.open(Path(output_path).resolve().as_uri())
 
     def _selected_invoice_id(self):
@@ -1857,8 +1866,8 @@ class TempoFactureApp:
         # ainsi un trou de sequence sans le savoir (bug trouve a l'audit,
         # voir A5). "Marquer annulee" produit le meme resultat pratique
         # (heures a nouveau facturables) sans jamais creer ce trou.
-        if not messagebox.askyesno(
-            APP_TITLE,
+        if not opl_theme.dialogue(
+            self.root, "Supprimer une facture",
             f"Supprimer definitivement la facture {invoice['invoice_number']} ?\n\n"
             "Les heures associees redeviendront facturables, mais le numero "
             f"{invoice['invoice_number']} disparaitra definitivement de votre "
@@ -1869,7 +1878,7 @@ class TempoFactureApp:
             "aussi les heures mais conserve la facture et son numero dans "
             "l'historique.\n\n"
             "Supprimer quand meme ?",
-        ):
+            confirmer="Supprimer la facture", danger=True):
             return
         self.db.delete_invoice(invoice_id)
         self._refresh_invoices()
@@ -1903,11 +1912,11 @@ class TempoFactureApp:
             messagebox.showerror(APP_TITLE, "Le client de cette facture n'existe plus.")
             return
 
-        if not messagebox.askyesno(
-            APP_TITLE,
+        if not opl_theme.dialogue(
+            self.root, "Dupliquer une facture",
             f"Creer une nouvelle facture pour '{client['name']}' avec les memes lignes que "
             f"{source_invoice['invoice_number']} ({len(line_items)} ligne(s)) ?",
-        ):
+            confirmer="Creer la facture"):
             return
 
         from tkinter import filedialog
@@ -1938,7 +1947,10 @@ class TempoFactureApp:
             return
 
         self._refresh_invoices()
-        if messagebox.askyesno(APP_TITLE, f"Facture {new_invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?"):
+        if opl_theme.dialogue(
+            self.root, "Facture generee",
+            f"Facture {new_invoice['invoice_number']} generee.\nOuvrir le PDF maintenant ?",
+            confirmer="Ouvrir le PDF"):
             webbrowser.open(Path(output_path).resolve().as_uri())
 
     def _reexport_invoice_pdf(self):
@@ -1987,7 +1999,10 @@ class TempoFactureApp:
             "Montants, dates et notes sont ceux figes a l'emission ;\n"
             "seules les coordonnees actuelles du client sont utilisees.",
         )
-        if messagebox.askyesno(APP_TITLE, "Ouvrir le PDF maintenant ?"):
+        if opl_theme.dialogue(
+            self.root, "PDF reexporte",
+            "Ouvrir le PDF maintenant ?",
+            confirmer="Ouvrir le PDF"):
             webbrowser.open(Path(output_path).resolve().as_uri())
 
     # -- onglet Parametres ----------------------------------------------------

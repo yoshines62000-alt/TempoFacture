@@ -83,7 +83,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_clients()
         self._select_client_row(client_id)
 
-        with patch("tkinter.messagebox.askyesno") as askyesno:
+        with patch("opl_theme.dialogue") as askyesno:
             self.app._toggle_client_archived()
 
         askyesno.assert_not_called()
@@ -98,7 +98,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_clients()
         self._select_client_row(client_id)
 
-        with patch("tkinter.messagebox.askyesno", return_value=True) as askyesno:
+        with patch("opl_theme.dialogue", return_value=True) as askyesno:
             self.app._toggle_client_archived()
 
         askyesno.assert_called_once()
@@ -113,7 +113,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_clients()
         self._select_client_row(client_id)
 
-        with patch("tkinter.messagebox.askyesno", return_value=False):
+        with patch("opl_theme.dialogue", return_value=False):
             self.app._toggle_client_archived()
 
         self.assertEqual(self.app.db.get_client(client_id)["archived"], 0)
@@ -130,7 +130,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_clients()
         self._select_client_row(client_id)
 
-        with patch("tkinter.messagebox.askyesno") as askyesno:
+        with patch("opl_theme.dialogue") as askyesno:
             self.app._toggle_client_archived()
 
         askyesno.assert_not_called()
@@ -591,7 +591,7 @@ class GuiSmokeTestCase(unittest.TestCase):
              patch("tkinter.messagebox.showwarning") as mock_warn, \
              patch("tkinter.messagebox.showerror") as mock_error, \
              patch("tkinter.messagebox.showinfo") as mock_info, \
-             patch("tkinter.messagebox.askyesno", return_value=False):
+             patch("opl_theme.dialogue", return_value=False):
             self.app._generate_invoice()
 
         invoices = self.app.db.list_invoices()
@@ -782,11 +782,11 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_invoices()
         self.app.invoices_tree.selection_set(str(invoice_id))
 
-        with patch("tkinter.messagebox.askyesno", return_value=False) as askyesno:
+        with patch("opl_theme.dialogue", return_value=False) as askyesno:
             self.app._delete_invoice()
 
         askyesno.assert_called_once()
-        message = askyesno.call_args[0][1]
+        message = askyesno.call_args[0][2]   # dialogue(parent, titre, MESSAGE)
         self.assertIn(invoice_number, message)
         self.assertIn("annulee", message.lower())
         self.assertIn("numero", message.lower())
@@ -806,7 +806,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self.app._refresh_invoices()
         self.app.invoices_tree.selection_set(str(invoice_id))
 
-        with patch("tkinter.messagebox.askyesno", return_value=True):
+        with patch("opl_theme.dialogue", return_value=True):
             self.app._delete_invoice()
 
         self.assertIsNone(self.app.db.get_invoice(invoice_id))
@@ -860,12 +860,12 @@ class GuiSmokeTestCase(unittest.TestCase):
         self._prepare_invoiceable_client()
         self.app.invoice_tax_var.set("200")
 
-        with patch("tkinter.messagebox.askyesno", return_value=False) as askyesno, \
+        with patch("opl_theme.dialogue", return_value=False) as askyesno, \
              patch("tkinter.filedialog.asksaveasfilename") as mock_save_dialog:
             self.app._generate_invoice()
 
         askyesno.assert_called_once()
-        message = askyesno.call_args[0][1]
+        message = askyesno.call_args[0][2]   # dialogue(parent, titre, MESSAGE)
         self.assertIn("200", message)
         # Refus de la confirmation : on ne va meme pas jusqu'au dialogue
         # d'enregistrement du PDF, et aucune facture n'est creee.
@@ -878,7 +878,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         output_path = self.tmp / "facture_tva_200.pdf"
 
         with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
-             patch("tkinter.messagebox.askyesno", return_value=True):
+             patch("opl_theme.dialogue", return_value=True):
             self.app._generate_invoice()
 
         invoices = self.app.db.list_invoices()
@@ -892,7 +892,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         output_path = self.tmp / "facture_tva_100.pdf"
 
         with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
-             patch("tkinter.messagebox.askyesno") as askyesno:
+             patch("opl_theme.dialogue") as askyesno:
             self.app._generate_invoice()
 
         # A 100% pile, pas au-dela : askyesno n'est sollicite que pour la
@@ -1159,7 +1159,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         entry_id = self._start_running_entry_in_the_past(hours_ago=3)
 
         with patch.object(gui, "get_uptime_seconds", return_value=120.0), \
-             patch("tkinter.messagebox.askyesno", return_value=True) as askyesno:
+             patch("opl_theme.dialogue", return_value=True) as askyesno:
             self.app._restore_running_timer()
 
         askyesno.assert_called_once()
@@ -1185,7 +1185,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         original_start = self.app.db.get_time_entry(entry_id)["start_time"]
 
         with patch.object(gui, "get_uptime_seconds", return_value=120.0), \
-             patch("tkinter.messagebox.askyesno", return_value=False) as askyesno:
+             patch("opl_theme.dialogue", return_value=False) as askyesno:
             self.app._restore_running_timer()
 
         askyesno.assert_called_once()
@@ -1200,7 +1200,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self._start_running_entry_in_the_past(hours_ago=3)
 
         with patch.object(gui, "get_uptime_seconds", return_value=None), \
-             patch("tkinter.messagebox.askyesno") as askyesno:
+             patch("opl_theme.dialogue") as askyesno:
             self.app._restore_running_timer()
 
         askyesno.assert_not_called()
@@ -1214,7 +1214,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         self._start_running_entry_in_the_past(hours_ago=3)
 
         with patch.object(gui, "get_uptime_seconds", return_value=10 * 3600), \
-             patch("tkinter.messagebox.askyesno") as askyesno:
+             patch("opl_theme.dialogue") as askyesno:
             self.app._restore_running_timer()
 
         askyesno.assert_not_called()
@@ -1288,7 +1288,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         # les deux ; webbrowser.open est mocke pour ne pas ouvrir un vrai
         # navigateur pendant le test.
         with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
-             patch("tkinter.messagebox.askyesno", return_value=True), \
+             patch("opl_theme.dialogue", return_value=True), \
              patch.object(gui.webbrowser, "open"):
             self.app._duplicate_invoice()
 
@@ -1315,7 +1315,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         output_path = self.tmp / "dup_echec.pdf"
 
         with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
-             patch("tkinter.messagebox.askyesno", return_value=True), \
+             patch("opl_theme.dialogue", return_value=True), \
              patch("tkinter.messagebox.showerror") as mock_error, \
              patch.object(gui, "generate_invoice_pdf", side_effect=RuntimeError("panne simulee")):
             self.app._duplicate_invoice()
