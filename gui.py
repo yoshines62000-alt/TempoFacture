@@ -3,6 +3,7 @@ factures et parametres, tous relies a la meme base SQLite locale."""
 
 from __future__ import annotations
 
+import functools
 import logging
 import queue
 import sys
@@ -97,7 +98,7 @@ def _configure_logging() -> Path:
     return path
 
 
-def _handle_uncaught_exception(exc_type, exc_value, exc_tb) -> None:
+def _handle_uncaught_exception(exc_type, exc_value, exc_tb, parent=None) -> None:
     """Gestionnaire d'exception Tk global (branche sur
     root.report_callback_exception dans TempoFactureApp.__init__).
 
@@ -111,13 +112,13 @@ def _handle_uncaught_exception(exc_type, exc_value, exc_tb) -> None:
     complete a ete enregistree."""
     _logger.error("Exception non geree dans un callback Tk", exc_info=(exc_type, exc_value, exc_tb))
     try:
-        messagebox.showerror(
-            APP_TITLE,
+        opl_theme.message(
+            parent, "Erreur inattendue",
             "Une erreur inattendue s'est produite et l'action demandee n'a "
             "pas pu aboutir.\n\n"
             f"Les details techniques ont ete enregistres dans :\n{_log_path()}\n\n"
             "Vous pouvez joindre ce fichier a un rapport de bug.",
-        )
+            ton="erreur")
     except Exception:
         # L'important est que la journalisation ci-dessus ait deja eu lieu :
         # un gestionnaire d'exceptions ne doit jamais lui-meme lever, ce qui
@@ -149,7 +150,11 @@ class TempoFactureApp:
         # bouton, etc.) sera journalisee et signalee a l'utilisateur au lieu
         # d'echouer silencieusement (voir D1 de l'audit).
         _configure_logging()
-        self.root.report_callback_exception = _handle_uncaught_exception
+        # partial : Tk appelle ce gestionnaire avec les trois arguments d'une
+        # exception et RIEN d'autre. La fenetre sur laquelle dessiner le
+        # message doit donc etre capturee ici, au branchement.
+        self.root.report_callback_exception = functools.partial(
+            _handle_uncaught_exception, parent=self.root)
 
         self.db = Database(_data_dir() / "tempofacture.sqlite")
         self.timer = Timer(self.db)
@@ -1117,7 +1122,10 @@ class TempoFactureApp:
         try:
             export_time_entries_csv(entries, Path(path))
         except OSError as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible d'exporter le CSV : {exc}")
+            opl_theme.message(
+                self.root, "Export impossible",
+                f"Impossible d'exporter le CSV : {exc}",
+                ton="erreur")
             return
         self.statut.dire(
             f"Export termine : {Path(path).name}",
@@ -1632,7 +1640,10 @@ class TempoFactureApp:
         try:
             export_invoices_csv(invoices, self.db, Path(path))
         except OSError as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible d'exporter le CSV : {exc}")
+            opl_theme.message(
+                self.root, "Export impossible",
+                f"Impossible d'exporter le CSV : {exc}",
+                ton="erreur")
             return
         self.statut.dire(
             f"Export termine : {Path(path).name}",
@@ -1824,7 +1835,10 @@ class TempoFactureApp:
                 currency=self._currency(), notes=self.invoice_notes_var.get(),
             )
         except ValueError as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
+            opl_theme.message(
+                self.root, "Facture non creee",
+                f"Impossible de creer la facture : {exc}",
+                ton="erreur")
             return
         invoice = self.db.get_invoice(invoice_id)
 
@@ -1928,7 +1942,10 @@ class TempoFactureApp:
         line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
         client = self.db.get_client(source_invoice["client_id"])
         if client is None:
-            messagebox.showerror(APP_TITLE, "Le client de cette facture n'existe plus.")
+            opl_theme.message(
+                self.root, "Client introuvable",
+                "Le client de cette facture n'existe plus.",
+                ton="erreur")
             return
 
         if not opl_theme.dialogue(
@@ -1956,7 +1973,10 @@ class TempoFactureApp:
                 notes=source_invoice["notes"],
             )
         except ValueError as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de creer la facture : {exc}")
+            opl_theme.message(
+                self.root, "Facture non creee",
+                f"Impossible de creer la facture : {exc}",
+                ton="erreur")
             return
         new_invoice = self.db.get_invoice(new_invoice_id)
 
@@ -2120,7 +2140,10 @@ class TempoFactureApp:
             # d'OSError - sans ce clause, ce cas pourtant tres plausible
             # (cle USB retiree entre l'ouverture du dialogue et le clic)
             # remontait comme un plantage non gere au lieu d'un message clair.
-            messagebox.showerror(APP_TITLE, f"Impossible d'enregistrer la sauvegarde : {exc}")
+            opl_theme.message(
+                self.root, "Sauvegarde impossible",
+                f"Impossible d'enregistrer la sauvegarde : {exc}",
+                ton="erreur")
             return
         messagebox.showinfo(
             APP_TITLE,

@@ -18,6 +18,34 @@ import opl_theme
 import gui
 from gui import TempoFactureApp
 
+# --- FILET ANTI-BLOCAGE -----------------------------------------------------
+# `opl_theme.message()` dessine une vraie fenetre modale qui attend un clic.
+# Un test qui emprunte un chemin d'erreur ferait pendre la suite ENTIERE : pas
+# d'echec, pas de trace, juste une execution qui ne finit jamais. On neutralise
+# donc le composant pour tout ce module. Les tests qui verifient un message le
+# repatchent localement — un patch imbrique prend le pas sur celui-ci.
+_filet_message = None
+
+
+def setUpModule():
+    # Imports locaux : les fichiers hotes ne nomment pas ces modules de la
+    # meme facon (`patch` ou `mock.patch`, `gui` ou `gui as gui_mod`, ou pas de
+    # gui du tout). `opl_theme` est le meme objet module que `gui.opl_theme`,
+    # le patch porte donc des deux cotes.
+    from unittest.mock import patch as _patch
+
+    import opl_theme as _theme
+
+    global _filet_message
+    _filet_message = _patch.object(_theme, "message")
+    _filet_message.start()
+
+
+def tearDownModule():
+    if _filet_message is not None:
+        _filet_message.stop()
+# ----------------------------------------------------------------------------
+
 
 class GuiSmokeTestCase(unittest.TestCase):
     def setUp(self):
@@ -711,13 +739,17 @@ class GuiSmokeTestCase(unittest.TestCase):
         except RuntimeError:
             exc_info = sys.exc_info()
 
-        with patch("tkinter.messagebox.showerror") as mock_error:
+        with patch.object(gui.opl_theme, "message") as mock_error:
             self.app.root.report_callback_exception(*exc_info)
 
         # 1) L'utilisateur voit un message clair : pas d'echec silencieux.
         mock_error.assert_called_once()
-        title, message = mock_error.call_args[0][:2]
-        self.assertEqual(title, gui.APP_TITLE)
+        parent, title, message = mock_error.call_args[0][:3]
+        # Tk appelle ce gestionnaire avec les seuls arguments de l'exception :
+        # la fenetre est capturee au branchement (functools.partial). Sans
+        # elle, message() n'aurait aucun parent ou se dessiner.
+        self.assertIs(parent, self.app.root)
+        self.assertEqual(title, "Erreur inattendue")
         self.assertIn("erreur inattendue", message.lower())
 
         # 2) La trace complete a ete journalisee dans un fichier exploitable
@@ -741,7 +773,7 @@ class GuiSmokeTestCase(unittest.TestCase):
             raise RuntimeError("boom bouton")
 
         button = tkinter.ttk.Button(self.root, text="x", command=boom)
-        with patch("tkinter.messagebox.showerror") as mock_error:
+        with patch.object(gui.opl_theme, "message") as mock_error:
             button.invoke()
             self.root.update()
 
