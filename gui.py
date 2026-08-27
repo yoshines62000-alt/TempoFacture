@@ -169,6 +169,11 @@ class TempoFactureApp:
         self.update_status_var = StringVar(value="")
         self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
+        # Ce qui s'est passe, SANS arreter l'utilisateur : un tiers des
+        # boites de cette suite ne posaient aucune question et n'annoncaient
+        # aucun echec — elles coutaient un clic pour dire « Termine ».
+        self.statut = opl_theme.Statut(bottom_bar)
+        self.statut.pack(side=LEFT, padx=(12, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
@@ -1098,7 +1103,9 @@ class TempoFactureApp:
     def _export_time_entries_csv(self):
         entries = self.db.list_time_entries()
         if not entries:
-            messagebox.showinfo(APP_TITLE, "Aucune entree de temps a exporter.")
+            self.statut.dire(
+                "Aucune entree de temps a exporter.",
+                ton="succes")
             return
         from tkinter import filedialog
         path = filedialog.asksaveasfilename(
@@ -1112,7 +1119,9 @@ class TempoFactureApp:
         except OSError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible d'exporter le CSV : {exc}")
             return
-        messagebox.showinfo(APP_TITLE, f"Export termine : {Path(path).name}")
+        self.statut.dire(
+            f"Export termine : {Path(path).name}",
+            ton="succes")
 
     def _start_timer(self):
         if self.timer.is_running:
@@ -1609,7 +1618,9 @@ class TempoFactureApp:
     def _export_invoices_csv(self):
         invoices = self.db.list_invoices()
         if not invoices:
-            messagebox.showinfo(APP_TITLE, "Aucune facture a exporter.")
+            self.statut.dire(
+                "Aucune facture a exporter.",
+                ton="succes")
             return
         from tkinter import filedialog
         path = filedialog.asksaveasfilename(
@@ -1623,7 +1634,9 @@ class TempoFactureApp:
         except OSError as exc:
             messagebox.showerror(APP_TITLE, f"Impossible d'exporter le CSV : {exc}")
             return
-        messagebox.showinfo(APP_TITLE, f"Export termine : {Path(path).name}")
+        self.statut.dire(
+            f"Export termine : {Path(path).name}",
+            ton="succes")
 
     def _on_invoice_search_changed(self):
         # Debounce : une frappe rapide de N caracteres ne doit pas declencher
@@ -1908,7 +1921,9 @@ class TempoFactureApp:
             return
         stored_items = self.db.get_invoice_line_items(invoice_id)
         if not stored_items:
-            messagebox.showwarning(APP_TITLE, "Cette facture n'a aucune ligne a dupliquer.")
+            self.statut.dire(
+                "Cette facture n'a aucune ligne a dupliquer.",
+                ton="alerte")
             return
         line_items = [LineItem(row["project_name"], row["hours"], row["rate"]) for row in stored_items]
         client = self.db.get_client(source_invoice["client_id"])
@@ -2154,7 +2169,9 @@ class TempoFactureApp:
         self._refresh_projects()
         self._refresh_time_entries()
         self._refresh_invoices()
-        messagebox.showinfo(APP_TITLE, "Parametres enregistres.")
+        self.statut.dire(
+            "Parametres enregistres.",
+            ton="succes")
 
     def _currency(self) -> str:
         return self.db.get_setting("currency", "EUR")
