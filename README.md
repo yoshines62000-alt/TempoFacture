@@ -35,7 +35,7 @@ clic à partir des heures non encore facturées.
 - **Détection d'inactivité** : si vous restez inactif pendant qu'un
   chronomètre tourne, l'application le signale et propose de retirer ce
   temps mort — pour ne jamais facturer un client pendant une pause. Le
-  seuil de déclenchement (5 minutes par défaut) se règle depuis l'onglet
+  seuil de déclenchement (5 minutes par défaut) se règle depuis la vue
   **Paramètres**. Comme pour les autres outils de cette suite, **aucune
   frappe clavier n'est jamais enregistrée** : seule la durée d'inactivité
   est mesurée (une simple horloge système), jamais le contenu tapé.
@@ -59,7 +59,7 @@ clic à partir des heures non encore facturées.
   reprises.
 - **Alerte factures en retard** : les factures non payées dont l'échéance
   est dépassée sont mises en évidence (couleur + compteur récapitulatif)
-  dans l'onglet Factures.
+  dans la vue Factures.
 - **Suivi des statuts** : marquez une facture comme payée, non payée ou
   annulée. Annuler une facture ne fait jamais perdre du temps déjà suivi :
   les heures redeviennent facturables.
@@ -73,7 +73,7 @@ clic à partir des heures non encore facturées.
   de fenêtre signale si une nouvelle version est disponible (simple requête
   vers l'API publique GitHub Releases, aucune donnée personnelle transmise)
   et propose un lien direct vers la page de téléchargement. Peut être
-  désactivé à tout moment depuis l'onglet **Paramètres** pour un usage
+  désactivé à tout moment depuis la vue **Paramètres** pour un usage
   strictement hors ligne.
 - **Gratuit et open source, pour toujours** : pas de version payante, pas
   de fonctionnalité verrouillée derrière un abonnement.
@@ -111,18 +111,18 @@ python -m pip install -r requirements.txt
 
 ## Utilisation
 
-1. Onglet **Clients** : ajoutez vos clients (nom, email, adresse, taux
+1. Vue **Clients** : ajoutez vos clients (nom, email, adresse, taux
    horaire par défaut). Double-cliquez sur une ligne existante pour modifier
    ses informations (par exemple une revalorisation de tarif) - les
    factures déjà émises conservent toujours leurs montants d'origine.
-2. Onglet **Projets** : créez un projet rattaché à un client, avec un taux
+2. Vue **Projets** : créez un projet rattaché à un client, avec un taux
    horaire propre si besoin (sinon celui du client s'applique).
    Double-cliquez sur une ligne existante pour modifier son nom ou son taux
    (laissez le taux vide pour revenir à celui du client).
-3. Onglet **Chronomètre** : choisissez un projet, cliquez sur **Démarrer**,
+3. Vue **Chronomètre** : choisissez un projet, cliquez sur **Démarrer**,
    travaillez, cliquez sur **Arrêter**. Vous pouvez aussi ajouter des heures
    manuellement.
-4. Onglet **Factures** : choisissez un client, la liste des heures non
+4. Vue **Factures** : choisissez un client, la liste des heures non
    facturées s'affiche automatiquement avec le montant estimé. Renseignez
    la TVA, cliquez sur **Générer la facture (PDF)**, choisissez où
    l'enregistrer. Si vous êtes exonéré de TVA (franchise en base), un
@@ -130,7 +130,7 @@ python -m pip install -r requirements.txt
    mention légale obligatoire (« TVA non applicable, art. 293 B du CGI »)
    dans les notes de la facture ; un modèle de note prêt à l'emploi portant
    ce nom est aussi fourni dès la première installation.
-5. Onglet **Paramètres** : renseignez le nom et les informations de votre
+5. Vue **Paramètres** : renseignez le nom et les informations de votre
    entreprise (affichés sur chaque facture générée), le délai de paiement
    par défaut, la devise, et le seuil d'inactivité du chronomètre. Une case
    à cocher permet aussi de désactiver la vérification de mise à jour au
@@ -146,12 +146,12 @@ python -m pip install -r requirements.txt
 - Seule activité réseau de l'application : au démarrage, une requête GET
   optionnelle vers l'API publique GitHub Releases pour signaler une
   nouvelle version disponible (aucune donnée personnelle ni identifiant
-  machine transmis). Désactivable depuis l'onglet **Paramètres** pour un
+  machine transmis). Désactivable depuis la vue **Paramètres** pour un
   usage strictement hors ligne.
 
 ## Sauvegarde et restauration
 
-- Onglet **Paramètres > Sauvegarde** : le bouton « Sauvegarder les
+- Vue **Paramètres > Sauvegarde** : le bouton « Sauvegarder les
   données... » enregistre une copie complète du fichier de données à
   l'emplacement de votre choix.
 - Pour restaurer une sauvegarde : fermez TempoFacture, puis remplacez le
