@@ -2234,12 +2234,17 @@ class TempoFactureApp:
         self.settings_idle_threshold_entry = ttk.Entry(form, textvariable=self.setting_idle_threshold_var, width=10)
         self.settings_idle_threshold_entry.grid(row=4, column=1, sticky="w", padx=5)
 
-        self.settings_erreur = opl_theme.Erreur(frame, apres=form)
+        # DANS le formulaire, juste sous les champs : `apres=form` la placait
+        # apres la case a cocher ET le bouton « Enregistrer », soit 96 px plus
+        # bas (mesure). Une porte gridee ici la ramene contre la saisie.
+        porte_erreur = ttk.Frame(form)
+        porte_erreur.grid(row=5, column=0, columnspan=2, sticky="we")
+        self.settings_erreur = opl_theme.Erreur(porte_erreur)
         ttk.Checkbutton(
             form, text="Verifier les mises a jour au demarrage (seule activite reseau de l'application)",
             variable=self.setting_check_updates_var,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
-        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=6, column=1, sticky="e", pady=10)
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Button(form, text="Enregistrer", command=self._save_settings).grid(row=7, column=1, sticky="e", pady=10)
         # Voir le commentaire equivalent dans _build_clients_tab (bug trouve
         # a l'audit, voir E2).
         for entry in (
