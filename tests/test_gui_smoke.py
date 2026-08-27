@@ -689,7 +689,7 @@ class GuiSmokeTestCase(unittest.TestCase):
         output_path = self.tmp / "facture_devise.pdf"
         with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
              patch("tkinter.messagebox.showwarning") as mock_warn, \
-             patch("tkinter.messagebox.showerror") as mock_error, \
+             patch.object(gui.opl_theme, "message") as mock_error, \
              patch("tkinter.messagebox.showinfo") as mock_info, \
              patch("opl_theme.dialogue", return_value=False):
             self.app._generate_invoice()
@@ -1420,7 +1420,7 @@ class GuiSmokeTestCase(unittest.TestCase):
 
         with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output_path)), \
              patch("opl_theme.dialogue", return_value=True), \
-             patch("tkinter.messagebox.showerror") as mock_error, \
+             patch.object(gui.opl_theme, "message") as mock_error, \
              patch.object(gui, "generate_invoice_pdf", side_effect=RuntimeError("panne simulee")):
             self.app._duplicate_invoice()
 

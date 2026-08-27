@@ -1883,7 +1883,10 @@ class TempoFactureApp:
             )
         except Exception as exc:
             self.db.delete_invoice(invoice_id)
-            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre, facture annulee : {exc}")
+            opl_theme.message(
+                self.root, "Facture annulee",
+                f"Le PDF n'a pas pu etre enregistre, la facture a donc ete annulee :\n{exc}",
+                ton="erreur")
             return False
         return True
 
@@ -2168,15 +2171,20 @@ class TempoFactureApp:
         except (OSError, ValueError) as exc:
             # Contrairement a _generate_invoice, aucune facture n'a ete creee
             # en base : il n'y a donc rien a annuler en cas d'echec.
-            messagebox.showerror(APP_TITLE, f"Le PDF n'a pas pu etre enregistre : {exc}")
+            opl_theme.message(
+                self.root, "Reexport impossible",
+                f"Le PDF n'a pas pu etre enregistre :\n{exc}",
+                ton="erreur")
             return
 
-        messagebox.showinfo(
-            APP_TITLE,
-            f"Facture {invoice['invoice_number']} reexportee.\n"
-            "Montants, dates et notes sont ceux figes a l'emission ;\n"
-            "seules les coordonnees actuelles du client sont utilisees.",
-        )
+        # Porte une MISE EN GARDE : ce qui a ete reexporte n'est pas ce que
+        # l'utilisateur verrait s'il refaisait la facture aujourd'hui.
+        opl_theme.message(
+            self.root, "Facture reexportee",
+            f"Facture {invoice['invoice_number']} reexportee.\n\n"
+            "Montants, dates et notes sont ceux figes a l'emission ; seules les "
+            "coordonnees actuelles du client sont utilisees.",
+            ton="info")
         if opl_theme.dialogue(
             self.root, "PDF reexporte",
             "Ouvrir le PDF maintenant ?",
@@ -2286,12 +2294,14 @@ class TempoFactureApp:
                 f"Impossible d'enregistrer la sauvegarde : {exc}",
                 ton="erreur")
             return
-        messagebox.showinfo(
-            APP_TITLE,
+        # Meme raison que dans Enveloppe : ce message porte la CONSIGNE de
+        # restauration, celle qu'il faudra relire le jour ou elle servira.
+        opl_theme.message(
+            self.root, "Sauvegarde enregistree",
             f"Sauvegarde enregistree :\n{path}\n\n"
             "Pour restaurer : fermez TempoFacture, puis remplacez le fichier de donnees "
             "actif par cette copie.",
-        )
+            ton="info")
 
     def _open_data_dir(self):
         import os
